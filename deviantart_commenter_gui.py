@@ -4808,7 +4808,7 @@ def replace_links_with_shortened(text, session, shortener="treeee"):
 # API the browser's JS uses to populate that div, and matches by the exact
 # commentId da_post_comment returns (not by guessing at text content).
 DA_COMMENTS_THREAD_URL = "https://www.deviantart.com/_puppy/dashared/comments/thread"
-VERIFY_LOAD_MAX_ATTEMPTS = 5
+VERIFY_LOAD_MAX_ATTEMPTS = 3
 
 
 def _copy_waf_cookie(dest_session, src_session):
@@ -4838,37 +4838,22 @@ def _copy_waf_cookie(dest_session, src_session):
     return True
 
 
-def verify_comment_posted(deviation_id, comment_id, proxy_text="", src_session=None):
+def verify_comment_posted(deviation_id, comment_id, proxy_text="", src_session=None, csrf_token=""):
     """Confirm a specific comment (by the exact commentId da_post_comment
     returned) is actually present and visible in the deviation's real
     comment thread.
 
-    `src_session`, if given, is the authenticated session that just posted
-    the comment — its `aws-waf-token` cookie is copied into each verification
-    session so the WAF challenge doesn't have to be re-solved for every
-    check. Without it, the verification session would hit HTTP 202 from
-    CloudFront and give up after 5 empty retries (confirmed live: this is
-    what was making every verification report "проверка неубедительна" even
-    when the comment was actually posted and publicly visible).
+    `csrf_token`, if given, is reused directly on the first attempt (skips
+    the slow da_fetch_csrf call that hits /join/ and may trigger WAF).
 
     Returns (True, msg) if found and not hidden, (False, msg) if the thread
-    loaded fine but the comment isn't there (or is there but flagged
-    hidden/spam by DA's own moderation — reported distinctly so that's easy
-    to tell apart from "never posted at all"), or (None, msg) if the thread
-    could never be loaded at all despite rotating through
-    VERIFY_LOAD_MAX_ATTEMPTS fresh IPs — inconclusive, not evidence of
-    anything either way.
+    loaded fine but the comment isn't there, or (None, msg) if inconclusive.
     """
     if not comment_id:
         return None, "Проверка невозможна — commentId не был получен из ответа на отправку"
 
     last_err = ""
     for load_attempt in range(VERIFY_LOAD_MAX_ATTEMPTS):
-        # Prefer reusing the authenticated posting session — it already has
-        # auth_secure + aws-waf-token + a valid csrf. The `_puppy/comments/
-        # thread` endpoint returns 403 to any anonymous session (confirmed
-        # live), so a fresh anonymous session can only ever get 403 here.
-        # Falls back to a fresh session only when no src_session was passed.
         if src_session is not None and load_attempt == 0:
             vsession = src_session
             owns_session = False
@@ -4897,14 +4882,17 @@ def verify_comment_posted(deviation_id, comment_id, proxy_text="", src_session=N
                 except Exception:
                     pass
 
-        csrf_token, csrf_err = da_fetch_csrf(vsession)
-        if not csrf_token:
-            last_err = f"csrf: {csrf_err}"
-            continue
+        if csrf_token and load_attempt == 0:
+            _csrf = csrf_token
+        else:
+            _csrf, csrf_err = da_fetch_csrf(vsession)
+            if not _csrf:
+                last_err = f"csrf: {csrf_err}"
+                continue
 
         try:
             params = {"typeid": 1, "itemid": deviation_id,
-                      "da_minor_version": str(DA_MINOR_VERSION), "csrf_token": csrf_token}
+                      "da_minor_version": str(DA_MINOR_VERSION), "csrf_token": _csrf}
             resp = vsession.get(DA_COMMENTS_THREAD_URL, params=params, headers=da_headers(), timeout=15)
         except Exception as e:
             last_err = str(e)[:150]
@@ -6950,7 +6938,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
 
                     if verify_comment:
                         verified, verify_msg = verify_comment_posted(
-                            int(dev_id), posted_comment_id, raw_proxy_str, src_session=session)
+                            int(dev_id), posted_comment_id, raw_proxy_str, src_session=session, csrf_token=csrf_token)
                         if verified:
                             sender_log(f"{prefix} ✅ {verify_msg}")
                             append_blacklist(username, url)
@@ -7018,8 +7006,11 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     # recovery path prints, and it's impossible to tell whether
                     # DA rejected the text or something else went wrong.
                     if is_spam_error(cerr):
-                        sender_log(f"{prefix} 🚫 DA отклонил комментарий на {username} как СПАМ "
-                                   f"— запускаю пробы, чтобы понять текст или весь аккаунт")
+                        if fallback_letters:
+                            sender_log(f"{prefix} 🚫 DA отклонил комментарий на {username} как СПАМ "
+                                       f"— запускаю пробы, чтобы понять текст или весь аккаунт")
+                        else:
+                            sender_log(f"{prefix} 🚫 DA отклонил комментарий на {username} как СПАМ")
                     elif is_unverified_account_error(cerr):
                         sender_log(f"{prefix} 🚫 DA отклонил комментарий на {username}: "
                                    f"email аккаунта не подтверждён")
@@ -7069,7 +7060,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                                         sender_log(f"{prefix} ✓ Буквы отправлены: {url} ('{fb_text}')")
                                         if verify_comment:
                                             v, vmsg = verify_comment_posted(
-                                                int(dev_id), fb_cid, raw_proxy_str, src_session=session)
+                                                int(dev_id), fb_cid, raw_proxy_str, src_session=session, csrf_token=csrf_token)
                                             if v:
                                                 sender_log(f"{prefix} ✅ {vmsg}")
                                                 append_blacklist(username, url)
@@ -7171,7 +7162,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                                         sender_log(f"{prefix} ⚠ Не удалось удалить комментарий: {derr[:100]}")
                             if verify_comment:
                                 verified, verify_msg = verify_comment_posted(
-                                    int(dev_id), posted_comment_id, raw_proxy_str, src_session=session)
+                                    int(dev_id), posted_comment_id, raw_proxy_str, src_session=session, csrf_token=csrf_token)
                                 if verified:
                                     sender_log(f"{prefix} ✅ {verify_msg}")
                                     append_blacklist(username, url)
