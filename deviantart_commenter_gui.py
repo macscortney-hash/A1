@@ -6816,11 +6816,15 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                         sender_log(f"{prefix} ❌ Не нашёл ссылку в поле текста для вставки в фото "
                                    f"(нужен формат {{текст;https://...}} или просто URL)")
                         continue
-                    photo_url = shorten_url(session, target, shortener or "treeee")
-                    if not photo_url:
-                        sender_log(f"{prefix} 🔴 ОШИБКА: не удалось сократить ссылку {target[:70]} — пропуск")
-                        continue
-                    sender_log(f"{prefix} ✅ {target[:70]} → {photo_url}")
+                    if shortener:
+                        photo_url = shorten_url(session, target, shortener)
+                        if not photo_url:
+                            sender_log(f"{prefix} 🔴 ОШИБКА: не удалось сократить ссылку {target[:70]} — пропуск")
+                            continue
+                        sender_log(f"{prefix} ✅ {target[:70]} → {photo_url}")
+                    else:
+                        photo_url = target
+                        sender_log(f"{prefix} ✅ Ссылка в фото (без сокращения): {photo_url[:70]}")
                     if dry_run:
                         sender_log(f"{prefix} 🧪 [тест] Прикрепил бы фото со ссылкой {photo_url}: {url} (автор {username})")
                         continue
@@ -6848,10 +6852,16 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     if dry_run:
                         sender_log(f"{prefix} 🧪 [тест] Нашёл бы и отправил комментарий: {url} (автор {username})")
                         continue
-                    text_preview = text_to_send[:60].replace("\n", " ")
-                    sender_log(f"{prefix} → Отправляю на {username} ({url}) [текст: {text_preview}...]")
-                    ok, cerr, posted_comment_id = da_post_comment(session, csrf_token, int(dev_id), text_to_send, url, image_deviation)
-                    verify_needle = text_to_send[:80]
+                    _is_image_only = attach_image and image_deviation and not text_to_send.strip()
+                    if _is_image_only:
+                        sender_log(f"{prefix} → Отправляю на {username} ({url}) [🖼 только изображение]")
+                        ok, cerr, posted_comment_id = da_post_comment(session, csrf_token, int(dev_id), "", url, image_deviation, empty_text=True)
+                        verify_needle = ""
+                    else:
+                        text_preview = text_to_send[:60].replace("\n", " ")
+                        sender_log(f"{prefix} → Отправляю на {username} ({url}) [текст: {text_preview}...]")
+                        ok, cerr, posted_comment_id = da_post_comment(session, csrf_token, int(dev_id), text_to_send, url, image_deviation)
+                        verify_needle = text_to_send[:80]
 
                 if ok:
                     # A successful post proves this account (fresh, pooled, or
@@ -7125,7 +7135,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
         if auto_register and not username_template.strip():
             sender_log("⚠️ Для авто-регистрации укажите шаблон имени пользователя")
             return
-        if not dry_run and not comment_text.strip():
+        if not dry_run and not comment_text.strip() and not photo_link:
             sender_log("⚠️ Введите текст комментария")
             return
         thread_count = max(1, int(thread_count or 1))
@@ -7834,7 +7844,8 @@ async function sStart() {
     const delete_special_comments = document.getElementById('sDeleteSpecialComments').checked;
     const username_template = document.getElementById('sUsernameTemplate').value;
     if (!cookies.trim() && !auto_register) { alert('Вставьте куки (или включите «Авто-регистрация», чтобы каждый поток сам создавал аккаунт)'); return; }
-    if (!dry_run && !comment_text.trim()) { alert(photo_link ? 'Вставьте ссылку в поле текста (она пойдёт в фото)' : 'Введите текст комментария'); return; }
+    if (!dry_run && !comment_text.trim() && !attach_image) { alert('Введите текст комментария'); return; }
+    if (!dry_run && !comment_text.trim() && photo_link) { alert('Вставьте ссылку в поле текста (она пойдёт в фото)'); return; }
     if (photo_link && !attach_image) { alert('Для «Ссылка в фото» включите галочку «Прикреплять изображение» и выберите файл'); return; }
     if (auto_register && !username_template.trim()) { alert('Для авто-регистрации укажите шаблон имени пользователя (например, Verification-XXXXXXX)'); return; }
 
