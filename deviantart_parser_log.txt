@@ -1,0 +1,49 @@
+﻿[20:07:39] ♻️ Аккаунт парсера был мёртв/пуст — зарегистрирован новый, куки обновлены
+[20:07:39] Старт парсинга: 1 ссылок, 1 поток(ов) на ссылки
+[20:07:39] [1] 🌐 Отпечаток: chrome124
+[20:07:39] [1] Обслуживает 1 ссылок, без прокси
+[20:07:42] [1] https://www.deviantart.com/ стр. 1: найдено 17, записано 17
+[20:07:43] [1] https://www.deviantart.com/ стр. 2: найдено 20, записано 20
+[20:07:44] [1] https://www.deviantart.com/ стр. 3: найдено 16, записано 16
+[20:07:44] [1] https://www.deviantart.com/ стр. 4: найдено 18, записано 18
+[20:07:45] [1] https://www.deviantart.com/ стр. 5: найдено 21, записано 21
+[20:07:46] [1] https://www.deviantart.com/ стр. 6: найдено 17, записано 17
+[20:07:46] [1] https://www.deviantart.com/ стр. 7: найдено 19, записано 19
+[20:07:47] [1] https://www.deviantart.com/ стр. 8: найдено 16, записано 16
+[20:07:47] [1] https://www.deviantart.com/ стр. 9: найдено 19, записано 19
+[20:07:48] [1] https://www.deviantart.com/ стр. 10: найдено 16, записано 16
+[20:07:49] [1] https://www.deviantart.com/ стр. 11: найдено 21, записано 21
+[20:07:50] [1] https://www.deviantart.com/ стр. 12: найдено 21, записано 21
+[20:07:51] [1] https://www.deviantart.com/ стр. 13: найдено 18, записано 18
+[20:07:52] [1] https://www.deviantart.com/ стр. 14: найдено 20, записано 20
+[20:07:52] [1] https://www.deviantart.com/ стр. 15: найдено 16, записано 16
+[20:07:53] [1] https://www.deviantart.com/ стр. 16: найдено 17, записано 17
+[20:07:54] [1] https://www.deviantart.com/ стр. 17: найдено 20, записано 20
+[20:07:55] [1] https://www.deviantart.com/ стр. 18: найдено 18, записано 18
+[20:07:55] [1] https://www.deviantart.com/ стр. 19: найдено 16, записано 16
+[20:07:56] [1] https://www.deviantart.com/ стр. 20: найдено 17, записано 17
+[20:07:57] [1] https://www.deviantart.com/ стр. 21: найдено 18, записано 18
+[20:07:58] [1] https://www.deviantart.com/ стр. 22: найдено 17, записано 16, дубликаты: 1
+[20:07:58] [1] https://www.deviantart.com/ стр. 23: найдено 20, записано 19, дубликаты: 1
+[20:07:59] [1] https://www.deviantart.com/ стр. 24: найдено 18, записано 18
+[20:08:00] [1] https://www.deviantart.com/ стр. 25: найдено 16, записано 16
+[20:08:00] [1] https://www.deviantart.com/ стр. 26: найдено 17, записано 16, дубликаты: 1
+[20:08:01] [1] https://www.deviantart.com/ стр. 27: найдено 19, записано 19
+[20:08:02] [1] https://www.deviantart.com/ стр. 28: найдено 19, записано 19
+[20:08:02] [1] https://www.deviantart.com/ стр. 29: найдено 16, записано 16
+[20:08:03] [1] https://www.deviantart.com/ стр. 30: найдено 15, записано 14, дубликаты: 1
+[20:08:03] [1] Скролл, страница 31: код 403 — <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<HTML><HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1">
+<TITLE>ERROR: The request could not be satisfied</TITLE>
+</HEAD><BODY>
+<H1>403 ERROR</H1>
+<H2>The request could 
+[20:08:03] [1] https://www.deviantart.com/ (скролл, нонстоп, прошли 30 стр.)
+[20:08:23] [1] Скролл, страница 1: код 403 — <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<HTML><HEAD><META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1">
+<TITLE>ERROR: The request could not be satisfied</TITLE>
+</HEAD><BODY>
+<H1>403 ERROR</H1>
+<H2>The request could 
+[20:08:23] [1] https://www.deviantart.com/ (скролл с продолжения, нонстоп, прошли 0 стр.)
+[20:08:23] [1] ⚠ Похоже, csrf_token протух — обновлю перед следующей попыткой

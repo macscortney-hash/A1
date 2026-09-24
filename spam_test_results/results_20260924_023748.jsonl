@@ -1,0 +1,1 @@
+{"strategy": "prefix_username_plain", "acct_idx": 0, "acct_id": "prefix_username_plain#1", "phase": "register", "ok": false, "err": "превышен лимит попыток регистрации (50)", "reg_seconds": 966.0, "ts": 1790207634.5559754, "ts_iso": "2026-09-24T02:53:54"}
