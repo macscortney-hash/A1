@@ -2560,6 +2560,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ sta.sh не удалось: {img_err}")
 
+            new_session._reg_proxy = pinned_proxy_str
             if pinned_proxy_str:
                 clear_session_proxy(new_session)
                 if keep_proxy_for_comments:
@@ -6789,10 +6790,10 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     return
                 _stash_attempts += 1
                 sender_log(f"{prefix} ⏳ Загрузка изображения в sta.sh (попытка {_stash_attempts})...")
-                _need_stash_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
+                _reg_proxy = getattr(session, '_reg_proxy', None)
+                _need_stash_proxy = not proxy_for_comments and bool(_reg_proxy or (raw_proxy_str and raw_proxy_str.strip()))
                 if _need_stash_proxy:
-                    _stag = "st" + uuid.uuid4().hex[:10]
-                    _sproxy = with_sticky_session(raw_proxy_str, _stag, lifetime_minutes=5)
+                    _sproxy = _reg_proxy or with_sticky_session(raw_proxy_str, "st" + uuid.uuid4().hex[:10], lifetime_minutes=5)
                     apply_proxy_to_session(session, _sproxy)
                 deviation, was_uploaded, err = da_get_or_upload_stash_deviation(
                     session, csrf_token, image_bytes, image_filename or "image.png", cookie_text,
@@ -6856,24 +6857,19 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
             key = username.lower()
 
             if reupload_image and attach_image and image_bytes and image_deviation and not dry_run:
-                for _reup_try in range(3):
-                    _need_reup_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
-                    if _need_reup_proxy:
-                        _rtag = "ru" + uuid.uuid4().hex[:10]
-                        _rproxy = with_sticky_session(raw_proxy_str, _rtag, lifetime_minutes=5)
-                        apply_proxy_to_session(session, _rproxy)
-                    new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
-                    if _need_reup_proxy:
-                        clear_session_proxy(session)
-                    if new_dev:
-                        image_deviation = new_dev
-                        sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
-                        break
-                    if _reup_try < 2:
-                        sender_log(f"{prefix} ⚠ Перезаливка не удалась (попытка {_reup_try + 1}/3): {rerr[:120]}")
-                        time.sleep(random.uniform(2, 4))
-                    else:
-                        sender_log(f"{prefix} ⚠ Перезаливка не удалась (3/3), использую предыдущее изображение")
+                _reg_proxy = getattr(session, '_reg_proxy', None)
+                _need_reup_proxy = not proxy_for_comments and bool(_reg_proxy or (raw_proxy_str and raw_proxy_str.strip()))
+                if _need_reup_proxy:
+                    _reup_px = _reg_proxy or with_sticky_session(raw_proxy_str, "ru" + uuid.uuid4().hex[:10], lifetime_minutes=5)
+                    apply_proxy_to_session(session, _reup_px)
+                new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
+                if _need_reup_proxy:
+                    clear_session_proxy(session)
+                if new_dev:
+                    image_deviation = new_dev
+                    sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
+                else:
+                    sender_log(f"{prefix} ⚠ Не удалось перезалить изображение, использую предыдущее")
 
             try:
                 if photo_link:
