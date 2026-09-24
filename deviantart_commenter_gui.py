@@ -1865,6 +1865,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
         "--disable-blink-features=AutomationControlled",
         "--ignore-certificate-errors",
         "--allow-running-insecure-content",
+        "--blink-settings=imagesEnabled=false",
     ]
     try:
         with sync_playwright() as pw:
@@ -1881,6 +1882,9 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
             try:
                 context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
+                page.route("**/*", lambda route: route.abort()
+                           if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                           else route.continue_())
                 try:
                     # Longer timeout for slow free proxies — the challenge
                     # JS needs a few seconds just to load through them.
@@ -2205,6 +2209,7 @@ def da_register_account(session, email, username, mail_provider=None, mail_ctx=N
                     sisu_csrf = _m.group(1)
                     break
 
+        clear_session_proxy(session)
         _log("onboarding...")
         if sisu_csrf:
             try:
@@ -2460,15 +2465,6 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 session._proxy_text = None
                 tempmailorg_set_proxy(None)
 
-            if log_prefix and ip_attempt <= 3:
-                try:
-                    _ip_r = session.get("https://api.ipify.org/", timeout=10, verify=False)
-                    _exit_ip = _ip_r.text.strip()
-                    _proxy_label = pinned_proxy_str.strip()[:40] if pinned_proxy_str else "НЕТ"
-                    sender_log(f"{log_prefix} 🔍 Диагностика: выходной IP={_exit_ip}, прокси={_proxy_label}, session.proxies={bool(session.proxies)}")
-                except Exception as _diag_e:
-                    sender_log(f"{log_prefix} 🔍 Диагностика: не удалось определить IP ({_diag_e.__class__.__name__}), прокси={pinned_proxy_str and 'ДА' or 'НЕТ'}")
-
             _log_fn = (lambda msg: sender_log(f"{log_prefix} {msg}")) if log_prefix else None
             use_auto = (_effective_mail_provider or "").lower() in ("auto", "")
             if use_auto:
@@ -2578,17 +2574,12 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
             if log_prefix:
                 sender_log(f"{log_prefix} ✅ Аккаунт зарегистрирован с {ip_attempt}-й попытки: {new_username}")
 
-            # Registration is the part that needs a (rotating) proxy — a fresh
-            # exit IP per thread that stays put for the whole signup+avatar
-            # flow, since curl_cffi keeps this Session's underlying connection
-            # alive. Posting comments afterwards doesn't need to hide behind a
-            # proxy the same way, and proxy traffic isn't free — go direct.
             if pinned_proxy_str:
                 if keep_proxy_for_comments:
+                    apply_proxy_to_session(new_session, pinned_proxy_str)
                     if log_prefix:
-                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси остаётся для отправки комментариев")
+                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси включён обратно для комментариев")
                 else:
-                    clear_session_proxy(new_session)
                     if log_prefix:
                         sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси отключен, дальше работаю напрямую")
 
