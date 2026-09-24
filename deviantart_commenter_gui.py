@@ -2033,13 +2033,11 @@ def _fetch_signup_tokens(session, log_fn=None):
             if log_fn:
                 log_fn("AWS WAF challenge (HTTP 202) — решаю через Playwright...")
             proxy_text = getattr(session, "_proxy_text", None)
-            csrf, lu, cookies, real_ua, err = _solve_awswaf_challenge_via_playwright(
+            csrf, lu, cookies, _real_ua, err = _solve_awswaf_challenge_via_playwright(
                 proxy_text=proxy_text, log_fn=log_fn,
                 profile=getattr(session, "_profile", None))
             if csrf:
                 added = _apply_playwright_cookies_to_session(session, cookies)
-                if real_ua:
-                    session._ua_override = real_ua
                 if log_fn:
                     log_fn(f"WAF challenge пройден, csrf получен, куки скопированы ({added})")
                 return csrf, lu, ""
@@ -2530,7 +2528,9 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                         _using_pool = True
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ Проблема с IP/соединением — беру другой IP...")
-                    _sleep(random.uniform(0.5, 1.5))
+                    # Longer sleep on connection errors — the proxy pool needs
+                    # a moment to recover, or we just burn through dead IPs.
+                    _sleep(random.uniform(1.5, 3.5))
                     continue
                 _consecutive_ip_fails += 1
                 if _pool_addr:
@@ -3576,27 +3576,8 @@ def make_session(profile=None):
 NAV_HEADERS = make_nav_headers(BROWSER_PROFILES[3])
 
 
-_CHROME_VER_RE = re.compile(r"Chrome/(\d+)\.")
-
-
 def nav_h(session):
-    """Return the navigation headers for `session`, overriding User-Agent
-    (and matching sec-ch-ua) with the real Chromium UA that solved the WAF
-    challenge (if any). CloudFront ties aws-waf-token to the browser
-    fingerprint that generated it — sending the token later with a mismatched
-    UA/client-hint bundle gets the account flagged as bot on /join/intent."""
-    base = getattr(session, '_nav_headers', NAV_HEADERS)
-    ua = getattr(session, '_ua_override', None)
-    if not ua:
-        return base
-    m = _CHROME_VER_RE.search(ua)
-    if m:
-        v = m.group(1)
-        sec_ch_ua = (
-            f'"Google Chrome";v="{v}", "Chromium";v="{v}", "Not?A_Brand";v="24"')
-        return {**base, "User-Agent": ua, "user-agent": ua,
-                "sec-ch-ua": sec_ch_ua, "sec-ch-ua-full-version": f'"{v}.0.0.0"'}
-    return {**base, "User-Agent": ua, "user-agent": ua}
+    return getattr(session, '_nav_headers', NAV_HEADERS)
 
 
 # ─── Autonomous proxy pool ────────────────────────────────────────────────────
@@ -4517,13 +4498,11 @@ def da_fetch_csrf(session, log_fn=None, prefix=""):
                 if log_fn:
                     log_fn(f"{prefix} AWS WAF challenge (HTTP 202) — решаю через Playwright...")
                 proxy_text = getattr(session, "_proxy_text", None)
-                p_csrf, _p_lu, cookies, real_ua, err = _solve_awswaf_challenge_via_playwright(
+                p_csrf, _p_lu, cookies, _real_ua, err = _solve_awswaf_challenge_via_playwright(
                     proxy_text=proxy_text, log_fn=log_fn,
                     profile=getattr(session, "_profile", None))
                 if p_csrf:
                     _apply_playwright_cookies_to_session(session, cookies)
-                    if real_ua:
-                        session._ua_override = real_ua
                     return str(p_csrf), ""
                 last_err = f"AWS WAF: {err}"
                 if attempt < attempts - 1:
