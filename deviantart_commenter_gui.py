@@ -2336,7 +2336,7 @@ def _is_plain_proxy(proxy_text):
     return len(text.split(":")) < 4
 
 
-def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_prefix="", keep_proxy_for_comments=True, mail_provider=None, mail_domain=None, stop_event=None):
+def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_prefix="", keep_proxy_for_comments=True, mail_provider=None, mail_domain=None, stop_event=None, attach_image=False, image_bytes=None, image_filename=""):
     """Build a brand-new session from scratch: no pasted cookies needed.
     Generates a temp email, registers a fresh account (username from the
     template with the XXXXXXX counter substituted), fetches a csrf_token,
@@ -2355,9 +2355,9 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
     `mail_domain` is only meaningful for emailnator (its address-style
     picker) — every other provider's get_email() takes no arguments.
 
-    Returns (session, csrf_token, error, confirmed_event) — confirmed_event
-    is da_register_account's email-confirmation event, or None if
-    registration itself never got that far.
+    Returns (session, csrf_token, error, confirmed_event, image_deviation)
+    — confirmed_event is da_register_account's email-confirmation event,
+    image_deviation is the sta.sh deviation dict (or None).
     """
     has_proxy = bool(proxy_text and proxy_text.strip())
     ip_attempt = 0
@@ -2390,11 +2390,11 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
 
     while True:
         if _stopped():
-            return None, "", "остановлено пользователем", None
+            return None, "", "остановлено пользователем", None, None
         if ip_attempt >= MAX_IP_ATTEMPTS:
             if log_prefix:
                 sender_log(f"{log_prefix} ❌ Достигнут лимит {MAX_IP_ATTEMPTS} попыток регистрации — сдаюсь")
-            return None, "", f"превышен лимит попыток регистрации ({MAX_IP_ATTEMPTS})", None
+            return None, "", f"превышен лимит попыток регистрации ({MAX_IP_ATTEMPTS})", None, None
         ip_attempt += 1
         pinned_proxy_str = None
         _pool_addr = None
@@ -2467,7 +2467,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 continue
 
             if _stopped():
-                return None, "", "остановлено пользователем", None
+                return None, "", "остановлено пользователем", None, None
 
             acc_num = get_next_temp_account_number(username_template)
             new_username = username_template.replace("XXXXXXX", f"{acc_num:07d}")
@@ -2480,7 +2480,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 mail_provider=actual_mail_provider, mail_ctx=mail_ctx, log_prefix=log_prefix)
             if not reg_ok:
                 if _stopped():
-                    return None, "", "остановлено пользователем", None
+                    return None, "", "остановлено пользователем", None, None
                 if USERNAME_TAKEN_MARKER in (reg_err or "").lower():
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ Имя «{new_username}» уже занято — пробую другой номер...")
@@ -2537,6 +2537,29 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
             if log_prefix:
                 sender_log(f"{log_prefix} ✅ Аккаунт зарегистрирован с {ip_attempt}-й попытки: {new_username}")
 
+            img_deviation = None
+            if attach_image and image_bytes:
+                if confirmed_event and not confirmed_event.is_set():
+                    if log_prefix:
+                        sender_log(f"{log_prefix} ⏳ Жду подтверждения email (макс 60 сек)...")
+                    if confirmed_event.wait(timeout=60):
+                        if log_prefix:
+                            sender_log(f"{log_prefix} ✅ Email подтверждён, продолжаю")
+                    else:
+                        if log_prefix:
+                            sender_log(f"{log_prefix} ⚠ Таймаут ожидания email — продолжаю")
+                if log_prefix:
+                    sender_log(f"{log_prefix} ⏳ Загрузка изображения в sta.sh (через прокси)...")
+                img_deviation, _was_up, img_err = da_get_or_upload_stash_deviation(
+                    new_session, csrf_token, image_bytes,
+                    image_filename or "image.png", new_account=True)
+                if img_deviation:
+                    if log_prefix:
+                        sender_log(f"{log_prefix} 🖼 Изображение загружено в sta.sh")
+                else:
+                    if log_prefix:
+                        sender_log(f"{log_prefix} ⚠ sta.sh не удалось: {img_err}")
+
             if pinned_proxy_str:
                 clear_session_proxy(new_session)
                 if keep_proxy_for_comments:
@@ -2547,10 +2570,10 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                     if log_prefix:
                         sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси отключен, дальше работаю напрямую")
 
-            return new_session, csrf_token, "", confirmed_event
+            return new_session, csrf_token, "", confirmed_event, img_deviation
         except Exception as e:
             if _stopped():
-                return None, "", "остановлено пользователем", None
+                return None, "", "остановлено пользователем", None, None
             _consecutive_ip_fails += 1
             if _pool_addr:
                 PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=300)
@@ -2587,7 +2610,7 @@ def ensure_working_da_cookies(cookie_text, proxy_text, username_template="Verifi
                 if resolved_username:
                     return cookie_text, False, ""
 
-    new_session, csrf_token, err, _confirmed = da_fresh_account_session(
+    new_session, csrf_token, err, _confirmed, _ = da_fresh_account_session(
         proxy_text, username_template, None, "[Авто-регистрация для парсера]")
     if not new_session:
         return cookie_text, False, err
@@ -6605,39 +6628,25 @@ def _reregister_account_for_thread(prefix, raw_proxy_str, username_template, ava
     Returns (session, csrf_token, image_deviation, err) — image_deviation is
     None when attach_image is False; err is "" on success.
     """
-    new_session, csrf_token, err, confirmed_event = da_fresh_account_session(
+    new_session, csrf_token, err, confirmed_event, img_deviation = da_fresh_account_session(
         raw_proxy_str, username_template, avatar_bytes, prefix, proxy_for_comments,
-        mail_provider=mail_provider, mail_domain=mail_domain, stop_event=stop_event)
+        mail_provider=mail_provider, mail_domain=mail_domain, stop_event=stop_event,
+        attach_image=attach_image, image_bytes=image_bytes, image_filename=image_filename)
     if not new_session:
         return None, "", None, err
 
-    if confirmed_event and not confirmed_event.is_set():
+    if not (attach_image and image_bytes) and confirmed_event and not confirmed_event.is_set():
         sender_log(f"{prefix} ⏳ Жду подтверждения email (макс 60 сек)...")
         if confirmed_event.wait(timeout=60):
             sender_log(f"{prefix} ✅ Email подтверждён, продолжаю")
         else:
             sender_log(f"{prefix} ⚠ Таймаут ожидания подтверждения email — продолжаю без гарантии")
 
-    image_deviation = None
-    if attach_image and image_bytes:
-        sender_log(f"{prefix} ⏳ Свежий аккаунт — жду инициализации sta.sh перед загрузкой изображения...")
-        _had_proxy = bool(raw_proxy_str and raw_proxy_str.strip())
-        if _had_proxy and not proxy_for_comments:
-            _stash_tag = "st" + uuid.uuid4().hex[:10]
-            _stash_proxy = with_sticky_session(raw_proxy_str, _stash_tag, lifetime_minutes=5)
-            apply_proxy_to_session(new_session, _stash_proxy)
-        new_deviation, was_uploaded, dev_err = da_get_or_upload_stash_deviation(
-            new_session, csrf_token, image_bytes, image_filename or "image.png", new_account=True)
-        if _had_proxy and not proxy_for_comments:
-            clear_session_proxy(new_session)
-        if new_deviation:
-            image_deviation = new_deviation
-            sender_log(f"{prefix} 🖼 Изображение для нового аккаунта готово")
-        else:
-            sender_log(f"{prefix} ❌ Не удалось подготовить изображение для нового аккаунта: {dev_err}")
-            return None, "", None, dev_err or "не удалось подготовить изображение"
+    if attach_image and image_bytes and not img_deviation:
+        sender_log(f"{prefix} ❌ Не удалось подготовить изображение для нового аккаунта")
+        return None, "", None, "не удалось подготовить изображение"
 
-    return new_session, csrf_token, image_deviation, ""
+    return new_session, csrf_token, img_deviation, ""
 
 
 def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
@@ -6715,9 +6724,10 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
             # for the rest of the run. Keep retrying here until it works or
             # the user hits Stop, instead of returning and ending the thread.
             confirmed_event = None
+            _init_img_dev = None
             while not session and not stop_event.is_set():
                 sender_log(f"{prefix} 🚀 Авто-регистрация: создаю новый аккаунт с нуля...")
-                session, csrf_token, err, confirmed_event = da_fresh_account_session(raw_proxy_str, username_template, avatar_bytes, prefix, proxy_for_comments, mail_provider=mail_provider, mail_domain=mail_domain, stop_event=stop_event)
+                session, csrf_token, err, confirmed_event, _init_img_dev = da_fresh_account_session(raw_proxy_str, username_template, avatar_bytes, prefix, proxy_for_comments, mail_provider=mail_provider, mail_domain=mail_domain, stop_event=stop_event, attach_image=attach_image, image_bytes=image_bytes, image_filename=image_filename)
                 if session:
                     break
                 sender_log(f"{prefix} ✗ {err} — повтор через 15 сек...")
@@ -6760,24 +6770,25 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     return
                 sender_log(f"{prefix} ✓ csrf_token получен, начинаю обработку блокнота")
 
-        if confirmed_event and not confirmed_event.is_set():
-            sender_log(f"{prefix} ⏳ Жду подтверждения email (макс 60 сек)...")
-            if confirmed_event.wait(timeout=60):
-                sender_log(f"{prefix} ✅ Email подтверждён, продолжаю")
-            else:
-                sender_log(f"{prefix} ⚠ Таймаут ожидания подтверждения email — продолжаю без гарантии")
+        if not (is_fresh_account and not used_pool_account and attach_image and image_bytes):
+            if confirmed_event and not confirmed_event.is_set():
+                sender_log(f"{prefix} ⏳ Жду подтверждения email (макс 60 сек)...")
+                if confirmed_event.wait(timeout=60):
+                    sender_log(f"{prefix} ✅ Email подтверждён, продолжаю")
+                else:
+                    sender_log(f"{prefix} ⚠ Таймаут ожидания подтверждения email — продолжаю без гарантии")
 
         image_deviation = None
-        if attach_image and image_bytes and not dry_run:
-            is_truly_new_account = is_fresh_account and not used_pool_account
+        if is_fresh_account and not used_pool_account:
+            image_deviation = _init_img_dev
+        if attach_image and image_bytes and not dry_run and image_deviation is None:
             _stash_attempts = 0
             _STASH_MAX_RETRIES = 3
             while image_deviation is None:
                 if stop_event and stop_event.is_set():
                     return
                 _stash_attempts += 1
-                if is_truly_new_account:
-                    sender_log(f"{prefix} ⏳ Свежий аккаунт — жду инициализации sta.sh перед загрузкой изображения...")
+                sender_log(f"{prefix} ⏳ Загрузка изображения в sta.sh (попытка {_stash_attempts})...")
                 _need_stash_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
                 if _need_stash_proxy:
                     _stag = "st" + uuid.uuid4().hex[:10]
@@ -6785,7 +6796,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     apply_proxy_to_session(session, _sproxy)
                 deviation, was_uploaded, err = da_get_or_upload_stash_deviation(
                     session, csrf_token, image_bytes, image_filename or "image.png", cookie_text,
-                    new_account=is_truly_new_account)
+                    new_account=(is_fresh_account and not used_pool_account))
                 if _need_stash_proxy:
                     clear_session_proxy(session)
                 if deviation:
@@ -6845,7 +6856,14 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
             key = username.lower()
 
             if reupload_image and attach_image and image_bytes and image_deviation and not dry_run:
+                _need_reup_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
+                if _need_reup_proxy:
+                    _rtag = "ru" + uuid.uuid4().hex[:10]
+                    _rproxy = with_sticky_session(raw_proxy_str, _rtag, lifetime_minutes=5)
+                    apply_proxy_to_session(session, _rproxy)
                 new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
+                if _need_reup_proxy:
+                    clear_session_proxy(session)
                 if new_dev:
                     image_deviation = new_dev
                     sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
@@ -8378,7 +8396,7 @@ class Handler(BaseHTTPRequestHandler):
                 mailtd_set_token(payload["mailtd_token"])
             if payload.get("smailpro_2captcha_key"):
                 smailpro_set_2captcha_key(payload["smailpro_2captcha_key"])
-            session, csrf_token, err, _confirmed = da_fresh_account_session(
+            session, csrf_token, err, _confirmed, _ = da_fresh_account_session(
                 proxy_text, username_template, None, "[Регистрация для парсера]",
                 mail_provider=reg_mail_prov, mail_domain=reg_mail_domain)
             if session:
