@@ -67,9 +67,9 @@ except ImportError:
 # Cap concurrent Chromium instances. With 20+ threads all launching Playwright
 # at once for WAF solving, they thrash CPU/memory and each takes far longer
 # than it would running alone — measured live: 6 concurrent finish in ~6s
-# each; 20 concurrent stall past 60s and start timing out. 8 keeps GUI thread
-# responsive while still parallelizing solves.
-_PLAYWRIGHT_SEMAPHORE = threading.BoundedSemaphore(8)
+# each; 20 concurrent stall past 60s and start timing out. 15 keeps most
+# threads working in parallel while avoiding the worst of the thrash.
+_PLAYWRIGHT_SEMAPHORE = threading.BoundedSemaphore(15)
 
 for _stream in (sys.stdout, sys.stderr):
     try:
