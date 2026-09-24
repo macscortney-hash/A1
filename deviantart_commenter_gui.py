@@ -3891,6 +3891,39 @@ class ProxyPool:
             except Exception:
                 pass
 
+    @staticmethod
+    def _is_datacenter_ip(ip):
+        """Filter out Cloudflare, AWS CloudFront and other known CDN/datacenter
+        IP ranges that DA instantly rejects for registration."""
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return False
+        try:
+            a, b = int(parts[0]), int(parts[1])
+        except ValueError:
+            return False
+        if a == 104 and 16 <= b <= 31:
+            return True
+        if a == 172 and 64 <= b <= 71:
+            return True
+        if a == 141 and b == 101:
+            return True
+        if a == 162 and b == 158:
+            return True
+        if a == 173 and b == 245:
+            return True
+        if a == 188 and b == 114:
+            return True
+        if a == 190 and b == 93:
+            return True
+        if a == 197 and b == 234:
+            return True
+        if a == 198 and b == 41:
+            return True
+        if a == 131 and b == 0:
+            return True
+        return False
+
     def _fetch_proxies(self):
         self._fetching = True
         all_addrs = set()
@@ -3939,6 +3972,8 @@ class ProxyPool:
                     break
                 ip = self._ip_of(addr)
                 if ip in self._burned_ips:
+                    continue
+                if self._is_datacenter_ip(ip):
                     continue
                 if addr not in self.proxies:
                     self.proxies[addr] = {"addr": addr, "latency": -1, "status": "unchecked",
@@ -4003,6 +4038,9 @@ class ProxyPool:
         real 202/200 still win the ordering even when the pool has thousands
         of 403-blocked entries.
         """
+        ip = self._ip_of(addr)
+        if self._is_datacenter_ip(ip):
+            return -1, "dead"
         proxy = {"http": f"http://{addr}", "https": f"http://{addr}"}
         ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                              "AppleWebKit/537.36 (KHTML, like Gecko) "
