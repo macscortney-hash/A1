@@ -1837,16 +1837,17 @@ _LU_PATTERNS = (
 
 def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile=None):
     """Launch Playwright headlessly, navigate to /join/, wait for the AWS WAF
-    challenge JS to auto-solve, and extract (csrf_token, lu_token, cookies).
+    challenge JS to auto-solve, and extract (csrf_token, lu_token, cookies, ua).
 
-    `profile` is the curl_cffi browser profile (from BROWSER_PROFILES) that
-    will use the resulting WAF cookie. Playwright's User-Agent and sec-ch-ua
-    are forced to match — CloudFront ties the aws-waf-token to the fingerprint
-    that solved it, and using it later from curl_cffi with a different UA is
-    what was causing the mass bot-detect on /join/intent.
+    Returns Playwright's REAL navigator.userAgent so the caller can override
+    curl_cffi's User-Agent header to match. Trying to spoof Playwright's UA
+    (forcing it to lie via context.user_agent=) made things worse — the JS
+    running the WAF challenge sees the real Chromium build via other client
+    hints, CloudFront detects the mismatch, and the token is issued marked
+    as suspicious.
     """
     if sync_playwright is None:
-        return None, "", None, "Playwright не установлен (pip install playwright)"
+        return None, "", None, None, "Playwright не установлен (pip install playwright)"
 
     proxy_cfg = None
     if proxy_text and proxy_text.strip():
@@ -1858,6 +1859,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile
                     proxy_cfg["username"], proxy_cfg["password"] = auth
         except Exception:
             proxy_cfg = None
+    _ = profile  # kept in the signature for older callers; no longer used to spoof UA
 
     # Free HTTP proxies often intercept HTTPS traffic (MITM) and re-sign it
     # with their own CA — Chromium then throws ERR_CERT_AUTHORITY_INVALID
@@ -1879,7 +1881,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile
     # caller (a per-account retry loop) is better off rotating IP than
     # blocking here indefinitely.
     if not _PLAYWRIGHT_SEMAPHORE.acquire(timeout=30):
-        return None, "", None, "Playwright: слот занят >30с (перегрузка)"
+        return None, "", None, None, "Playwright: слот занят >30с (перегрузка)"
     try:
         with sync_playwright() as pw:
             try:
@@ -1893,20 +1895,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile
                     args=_launch_args,
                     ignore_default_args=["--enable-automation"])
             try:
-                _ctx_kwargs = {"ignore_https_errors": True}
-                if profile:
-                    _ver = profile["impersonate"].replace("chrome", "")
-                    _ctx_kwargs["user_agent"] = (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        f"Chrome/{_ver}.0.0.0 Safari/537.36")
-                    _ctx_kwargs["extra_http_headers"] = {
-                        "sec-ch-ua": profile["sec-ch-ua"],
-                        "sec-ch-ua-mobile": "?0",
-                        "sec-ch-ua-platform": '"Windows"',
-                        "accept-language": "en-US,en;q=0.9",
-                    }
-                context = browser.new_context(**_ctx_kwargs)
+                context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
                 page.route("**/*", lambda route: route.abort()
                            if route.request.resource_type in ("image", "font", "media", "stylesheet")
@@ -1918,7 +1907,16 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile
                     page.goto("https://www.deviantart.com/join/",
                               timeout=45000, wait_until="domcontentloaded")
                 except Exception as e:
-                    return None, "", None, f"Playwright goto: {str(e)[:150]}"
+                    return None, "", None, None, f"Playwright goto: {str(e)[:150]}"
+
+                # Grab the real navigator.userAgent so callers can pin
+                # curl_cffi requests to the exact fingerprint that solved
+                # the WAF challenge.
+                real_ua = ""
+                try:
+                    real_ua = page.evaluate("() => navigator.userAgent") or ""
+                except Exception:
+                    real_ua = ""
 
                 csrf = None
                 lu = ""
@@ -1955,17 +1953,17 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile
                         break
 
                 if not csrf:
-                    return None, "", None, "Playwright не смог получить csrf (challenge не прошёл за 60с)"
+                    return None, "", None, real_ua, "Playwright не смог получить csrf (challenge не прошёл за 60с)"
 
                 cookies = context.cookies()
-                return str(csrf), str(lu or ""), cookies, ""
+                return str(csrf), str(lu or ""), cookies, real_ua, ""
             finally:
                 try:
                     browser.close()
                 except Exception:
                     pass
     except Exception as e:
-        return None, "", None, f"Playwright исключение: {str(e)[:200]}"
+        return None, "", None, None, f"Playwright исключение: {str(e)[:200]}"
     finally:
         _PLAYWRIGHT_SEMAPHORE.release()
 
@@ -2035,11 +2033,13 @@ def _fetch_signup_tokens(session, log_fn=None):
             if log_fn:
                 log_fn("AWS WAF challenge (HTTP 202) — решаю через Playwright...")
             proxy_text = getattr(session, "_proxy_text", None)
-            csrf, lu, cookies, err = _solve_awswaf_challenge_via_playwright(
+            csrf, lu, cookies, real_ua, err = _solve_awswaf_challenge_via_playwright(
                 proxy_text=proxy_text, log_fn=log_fn,
                 profile=getattr(session, "_profile", None))
             if csrf:
                 added = _apply_playwright_cookies_to_session(session, cookies)
+                if real_ua:
+                    session._ua_override = real_ua
                 if log_fn:
                     log_fn(f"WAF challenge пройден, csrf получен, куки скопированы ({added})")
                 return csrf, lu, ""
@@ -3576,8 +3576,27 @@ def make_session(profile=None):
 NAV_HEADERS = make_nav_headers(BROWSER_PROFILES[3])
 
 
+_CHROME_VER_RE = re.compile(r"Chrome/(\d+)\.")
+
+
 def nav_h(session):
-    return getattr(session, '_nav_headers', NAV_HEADERS)
+    """Return the navigation headers for `session`, overriding User-Agent
+    (and matching sec-ch-ua) with the real Chromium UA that solved the WAF
+    challenge (if any). CloudFront ties aws-waf-token to the browser
+    fingerprint that generated it — sending the token later with a mismatched
+    UA/client-hint bundle gets the account flagged as bot on /join/intent."""
+    base = getattr(session, '_nav_headers', NAV_HEADERS)
+    ua = getattr(session, '_ua_override', None)
+    if not ua:
+        return base
+    m = _CHROME_VER_RE.search(ua)
+    if m:
+        v = m.group(1)
+        sec_ch_ua = (
+            f'"Google Chrome";v="{v}", "Chromium";v="{v}", "Not?A_Brand";v="24"')
+        return {**base, "User-Agent": ua, "user-agent": ua,
+                "sec-ch-ua": sec_ch_ua, "sec-ch-ua-full-version": f'"{v}.0.0.0"'}
+    return {**base, "User-Agent": ua, "user-agent": ua}
 
 
 # ─── Autonomous proxy pool ────────────────────────────────────────────────────
@@ -4498,11 +4517,13 @@ def da_fetch_csrf(session, log_fn=None, prefix=""):
                 if log_fn:
                     log_fn(f"{prefix} AWS WAF challenge (HTTP 202) — решаю через Playwright...")
                 proxy_text = getattr(session, "_proxy_text", None)
-                p_csrf, _p_lu, cookies, err = _solve_awswaf_challenge_via_playwright(
+                p_csrf, _p_lu, cookies, real_ua, err = _solve_awswaf_challenge_via_playwright(
                     proxy_text=proxy_text, log_fn=log_fn,
                     profile=getattr(session, "_profile", None))
                 if p_csrf:
                     _apply_playwright_cookies_to_session(session, cookies)
+                    if real_ua:
+                        session._ua_override = real_ua
                     return str(p_csrf), ""
                 last_err = f"AWS WAF: {err}"
                 if attempt < attempts - 1:
