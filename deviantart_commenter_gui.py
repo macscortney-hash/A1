@@ -1942,14 +1942,21 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
 
 
 def _apply_playwright_cookies_to_session(session, cookies):
-    """Copy Playwright cookie dicts into a curl_cffi/requests session's jar.
+    """Replace curl_cffi session cookies with Playwright's cookie jar.
 
-    The critical one is `aws-waf-token` — with it, curl_cffi passes the WAF
-    check on all subsequent requests to www.deviantart.com without another
-    challenge.
+    After Playwright solves the WAF challenge and loads /join/, its cookie
+    set is the authoritative one — the csrf_token and lu_token it extracted
+    are bound to these cookies. curl_cffi's old cookies (from the initial
+    202 response) can conflict: DA may reject signup2 if it sees a stale or
+    mismatched session cookie alongside the fresh WAF token. Clearing first
+    ensures the POST uses exactly the session state Playwright established.
     """
     if not cookies:
         return 0
+    try:
+        session.cookies.clear()
+    except Exception:
+        pass
     n = 0
     for c in cookies:
         try:
@@ -2524,7 +2531,8 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 if _is_bad_ip_error(reg_err):
                     _consecutive_ip_fails += 1
                     if _pool_addr:
-                        PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=600)
+                        _cf_blocked = CLOUDFRONT_BLOCK_MARKER in (reg_err or "").lower()
+                        PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=3600 if _cf_blocked else 600)
                     if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
                         _using_pool = True
                     if log_prefix:
@@ -3702,7 +3710,7 @@ class ProxyPool:
                 continue
             last_ts = float(entry.get("lastCheckTs") or 0)
             status = entry.get("status", "unchecked")
-            if status == "dead" and last_ts and (now - last_ts) > DA_POOL_STALE_MAX_AGE:
+            if status in ("dead", "cf_blocked") and last_ts and (now - last_ts) > DA_POOL_STALE_MAX_AGE:
                 continue
             self.proxies[addr] = {
                 "addr": addr,
@@ -3825,7 +3833,7 @@ class ProxyPool:
 
     def clear_dead(self):
         with self.lock:
-            self.proxies = {k: v for k, v in self.proxies.items() if v["status"] != "dead"}
+            self.proxies = {k: v for k, v in self.proxies.items() if v["status"] not in ("dead", "cf_blocked")}
 
     def clear_all(self):
         with self.lock:
@@ -3835,8 +3843,9 @@ class ProxyPool:
     def get_all(self, limit=500):
         with self.lock:
             result = list(self.proxies.values())
+        _order = {"alive": 0, "unchecked": 1, "cf_blocked": 2, "dead": 3}
         result.sort(key=lambda p: (
-            0 if p["status"] == "alive" else (1 if p["status"] == "unchecked" else 2),
+            _order.get(p["status"], 4),
             p["latency"] if p["latency"] > 0 else 99999,
         ))
         return result[:limit]
@@ -3846,14 +3855,15 @@ class ProxyPool:
             total = len(self.proxies)
             alive = sum(1 for p in self.proxies.values() if p["status"] == "alive")
             dead = sum(1 for p in self.proxies.values() if p["status"] == "dead")
-            unchecked = total - alive - dead
+            cf_blocked = sum(1 for p in self.proxies.values() if p["status"] == "cf_blocked")
+            unchecked = total - alive - dead - cf_blocked
             reserved = len(self._reserved)
             in_flight = len(self._checking_set)
             active = self._active_checkers
             check_count = self._check_count
         return {
-            "total": total, "alive": alive, "dead": dead, "unchecked": unchecked,
-            "reserved": reserved,
+            "total": total, "alive": alive, "dead": dead, "cf_blocked": cf_blocked,
+            "unchecked": unchecked, "reserved": reserved,
             "checking": active > 0 and in_flight > 0,
             "fetching": self._fetching,
             "lastFetch": self._last_fetch, "lastCheck": self._last_check,
@@ -3914,7 +3924,7 @@ class ProxyPool:
             if free_slots < len(all_addrs):
                 to_free = len(all_addrs) - free_slots
                 dead = sorted(
-                    (p for p in self.proxies.values() if p["status"] == "dead"),
+                    (p for p in self.proxies.values() if p["status"] in ("dead", "cf_blocked")),
                     key=lambda p: p.get("lastCheckTs") or 0,
                 )
                 for p in dead[:to_free]:
@@ -3967,7 +3977,7 @@ class ProxyPool:
                 return best
             for i in range(SCAN):
                 addr, p = items[(start + i) % n]
-                if (p["status"] == "dead"
+                if (p["status"] in ("dead", "cf_blocked")
                         and addr not in self._checking_set
                         and now - (p.get("lastCheckTs") or 0) > DA_POOL_DEAD_RECHECK_S):
                     self._checking_set.add(addr)
@@ -4028,8 +4038,10 @@ class ProxyPool:
             return ms, "alive"
         if code == 202 and reached_da:
             return ms, "alive"
-        if code in (403, 429) and reached_da:
-            return ms, "alive"
+        if code == 403 and reached_da:
+            return ms, "cf_blocked"
+        if code == 429 and reached_da:
+            return ms, "cf_blocked"
         return -1, "dead"
 
     def _check_worker(self):
@@ -7434,6 +7446,10 @@ label.chk input { width:auto; }
                 <div id="ppStatAlive" style="font-size:18px; color:#4ade80; font-weight:bold;">0</div>
             </div>
             <div style="background:#1f2937; padding:8px; border-radius:4px;">
+                <div style="color:#9ca3af;">CF-blocked</div>
+                <div id="ppStatCfBlocked" style="font-size:18px; color:#fb923c; font-weight:bold;">0</div>
+            </div>
+            <div style="background:#1f2937; padding:8px; border-radius:4px;">
                 <div style="color:#9ca3af;">Мёртвых</div>
                 <div id="ppStatDead" style="font-size:18px; color:#f87171; font-weight:bold;">0</div>
             </div>
@@ -7929,6 +7945,7 @@ async function ppAddManual() {
 
 function _ppStatusChip(s) {
     if (s === 'alive') return '<span style="color:#4ade80;">● живой</span>';
+    if (s === 'cf_blocked') return '<span style="color:#fb923c;">● CF-blocked</span>';
     if (s === 'dead') return '<span style="color:#f87171;">● мёртвый</span>';
     return '<span style="color:#facc15;">● в очереди</span>';
 }
@@ -7939,6 +7956,7 @@ async function ppUpdate() {
         const st = data.stats || {};
         document.getElementById('ppStatTotal').textContent = st.total || 0;
         document.getElementById('ppStatAlive').textContent = st.alive || 0;
+        document.getElementById('ppStatCfBlocked').textContent = st.cf_blocked || 0;
         document.getElementById('ppStatDead').textContent = st.dead || 0;
         document.getElementById('ppStatUnchecked').textContent = st.unchecked || 0;
         document.getElementById('ppStatChecks').textContent = st.checkCount || 0;
