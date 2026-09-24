@@ -1883,7 +1883,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
                 context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
                 page.route("**/*", lambda route: route.abort()
-                           if route.request.resource_type in ("image", "font", "media", "stylesheet")
+                           if route.request.resource_type in ("image", "font", "media")
                            else route.continue_())
                 try:
                     # Longer timeout for slow free proxies — the challenge
@@ -2198,41 +2198,6 @@ def da_register_account(session, email, username, mail_provider=None, mail_ctx=N
                 pass
 
             return None, False, f"auth cookies отсутствуют после signup — {reject_reason}", None
-
-        sisu_csrf = None
-        if intent_resp and intent_resp.status_code == 200:
-            for _pat in [re.compile(r'"csrfToken"\s*:\s*"([^"]+)"'),
-                         re.compile(r'csrfToken\\"\s*:\s*\\"([^"\\]+)'),
-                         re.compile(r'name="csrf_token"\s+value="([^"]+)"')]:
-                _m = _pat.search(intent_resp.text)
-                if _m:
-                    sisu_csrf = _m.group(1)
-                    break
-
-        _log("onboarding...")
-        if sisu_csrf:
-            try:
-                session.post("https://www.deviantart.com/_sisu/do/saveintents",
-                             headers=_signup_nav_headers("https://www.deviantart.com/join/intent"),
-                             data={"referer": "https://www.deviantart.com/",
-                                   "referer_type": "", "csrf_token": sisu_csrf,
-                                   "intents": "discover"},
-                             timeout=45, allow_redirects=True)
-            except Exception:
-                pass
-
-            try:
-                session.post("https://www.deviantart.com/_sisu/do/save_content_filter",
-                             headers=_signup_nav_headers("https://www.deviantart.com/join/content-filter"),
-                             data={"referer": "https://www.deviantart.com/",
-                                   "referer_type": "", "csrf_token": sisu_csrf,
-                                   "content_filter": "mature"},
-                             timeout=45, allow_redirects=True)
-            except Exception:
-                pass
-            _log("onboarding done")
-        else:
-            _log("sisu_csrf не найден — onboarding пропущен")
 
         confirmed_event = threading.Event()
 
@@ -2561,9 +2526,6 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 _sleep(random.uniform(2.0, 5.0))
                 continue
 
-            if pinned_proxy_str:
-                clear_session_proxy(new_session)
-
             if avatar_bytes:
                 ok, err = da_set_avatar(new_session, csrf_token, avatar_bytes, "avatar.jpg")
                 if log_prefix:
@@ -2576,6 +2538,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 sender_log(f"{log_prefix} ✅ Аккаунт зарегистрирован с {ip_attempt}-й попытки: {new_username}")
 
             if pinned_proxy_str:
+                clear_session_proxy(new_session)
                 if keep_proxy_for_comments:
                     apply_proxy_to_session(new_session, pinned_proxy_str)
                     if log_prefix:
@@ -4896,6 +4859,19 @@ def verify_comment_posted(deviation_id, comment_id, proxy_text="", src_session=N
             else:
                 vsession._proxy_text = None
             _copy_waf_cookie(vsession, src_session)
+            if src_session is not None:
+                try:
+                    src_cookies = src_session.cookies.get_dict()
+                    for cname in ("auth", "auth_secure", "userinfo"):
+                        cval = src_cookies.get(cname)
+                        if cval:
+                            for domain in (".www.deviantart.com", ".deviantart.com"):
+                                try:
+                                    vsession.cookies.set(cname, cval, domain=domain, path="/")
+                                except TypeError:
+                                    vsession.cookies.set(cname, cval)
+                except Exception:
+                    pass
 
         csrf_token, csrf_err = da_fetch_csrf(vsession)
         if not csrf_token:
@@ -6645,8 +6621,15 @@ def _reregister_account_for_thread(prefix, raw_proxy_str, username_template, ava
     image_deviation = None
     if attach_image and image_bytes:
         sender_log(f"{prefix} ⏳ Свежий аккаунт — жду инициализации sta.sh перед загрузкой изображения...")
+        _had_proxy = bool(raw_proxy_str and raw_proxy_str.strip())
+        if _had_proxy and not proxy_for_comments:
+            _stash_tag = "st" + uuid.uuid4().hex[:10]
+            _stash_proxy = with_sticky_session(raw_proxy_str, _stash_tag, lifetime_minutes=5)
+            apply_proxy_to_session(new_session, _stash_proxy)
         new_deviation, was_uploaded, dev_err = da_get_or_upload_stash_deviation(
             new_session, csrf_token, image_bytes, image_filename or "image.png", new_account=True)
+        if _had_proxy and not proxy_for_comments:
+            clear_session_proxy(new_session)
         if new_deviation:
             image_deviation = new_deviation
             sender_log(f"{prefix} 🖼 Изображение для нового аккаунта готово")
@@ -6664,7 +6647,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                    photo_link=False, auto_register=False, username_template="", avatar_bytes=None,
                    proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
                    uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False,
-                   reupload_image=False):
+                   reupload_image=False, single_comment=False, fallback_letters=False):
     """Tab 2 worker: pulls from the notebook file (never talks to the parser
     directly), reserving its author in-memory for the duration of the
     attempt so no other thread can double-claim the same author's post at
@@ -6965,6 +6948,23 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                         append_blacklist(username, url)
                         with sender_lock:
                             sender_state["sent"] += 1
+
+                    if single_comment and auto_register and username_template:
+                        sender_log(f"{prefix} 🔄 1 отправка — создаю новый аккаунт...")
+                        new_session, new_csrf, new_image_dev, reg_err = _reregister_account_for_thread(
+                            prefix, raw_proxy_str, username_template, avatar_bytes, proxy_for_comments,
+                            mail_provider, mail_domain, attach_image, image_bytes, image_filename,
+                            stop_event=stop_event)
+                        if new_session:
+                            session = new_session
+                            csrf_token = new_csrf
+                            if attach_image and image_bytes:
+                                image_deviation = new_image_dev
+                            account_healthy = False
+                            used_pool_account = False
+                            consecutive_verify_misses = 0
+                        else:
+                            sender_log(f"{prefix} ❌ {reg_err}")
                 else:
                     # Always log up-front what DA said before we do anything else
                     # (probing, rotating account, refreshing csrf). Otherwise the
@@ -7009,6 +7009,36 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                             spam_type = _probe_spam_type(
                                 session, csrf_token, dev_id, url,
                                 sender_log, prefix, stop_event)
+                            if spam_type == "text" and fallback_letters:
+                                fb_text = "".join(random.choices(string.ascii_lowercase, k=random.randint(2, 5)))
+                                sender_log(f"{prefix} 🔤 Текст заспамлен — отправляю '{fb_text}' вместо текста...")
+                                try:
+                                    fb_ok, fb_err, fb_cid = da_post_comment(
+                                        session, csrf_token, int(dev_id), fb_text, url, image_deviation)
+                                    if fb_ok:
+                                        account_healthy = True
+                                        sender_log(f"{prefix} ✓ Буквы отправлены: {url} ('{fb_text}')")
+                                        if verify_comment:
+                                            v, vmsg = verify_comment_posted(
+                                                int(dev_id), fb_cid, raw_proxy_str, src_session=session)
+                                            if v:
+                                                sender_log(f"{prefix} ✅ {vmsg}")
+                                                append_blacklist(username, url)
+                                                with sender_lock:
+                                                    sender_state["sent"] += 1
+                                            elif v is False:
+                                                sender_log(f"{prefix} 🔴 {vmsg}")
+                                            else:
+                                                sender_log(f"{prefix} ⚠ {vmsg}")
+                                        else:
+                                            append_blacklist(username, url)
+                                            with sender_lock:
+                                                sender_state["sent"] += 1
+                                        continue
+                                    else:
+                                        sender_log(f"{prefix} ⚠ Буквы тоже отклонены: {(fb_err or '')[:100]}")
+                                except Exception as fb_e:
+                                    sender_log(f"{prefix} ⚠ Ошибка при отправке букв: {str(fb_e)[:100]}")
                             if spam_type == "text":
                                 sender_log(f"{prefix} ⚠ Итог: заспамлен ТЕКСТ на аккаунте "
                                            f"{username} ({url}) — создаю новый аккаунт...")
@@ -7153,7 +7183,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                   auto_register=False, username_template="", avatar_bytes=None,
                   proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
                   uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False,
-                  reupload_image=False):
+                  reupload_image=False, single_comment=False, fallback_letters=False):
     """Tab 2: reads from the notebook file the parser tab fills — no feed
     URL of its own, no scrolling, nothing but consuming the notebook.
     """
@@ -7189,6 +7219,8 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                    + (", перезаливка изображения каждый раз" if reupload_image and attach_image else "")
                    + (", ссылка в фото (без текста)" if photo_link else "")
                    + (", каждый поток регистрирует свой аккаунт с нуля" if auto_register and not cookie_text.strip() else "")
+                   + (", 1 отправка на аккаунт" if single_comment else "")
+                   + (", буквы при спаме текста" if fallback_letters else "")
                    + (f", задержка между комментариями ~{comment_delay:g} сек" if comment_delay > 0 else ""))
 
         reserved = set()
@@ -7207,7 +7239,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                                        auto_register, username_template, avatar_bytes,
                                        proxy_for_comments, mail_provider, comment_delay, mail_domain,
                                        uniqueify_text, send_random_after_spam, delete_special_comments,
-                                       reupload_image),
+                                       reupload_image, single_comment, fallback_letters),
                                  daemon=True)
             t.start()
             workers.append(t)
@@ -7393,7 +7425,9 @@ label.chk input { width:auto; }
         <label class="chk"><input type="checkbox" id="sPhotoLink"> Ссылка в фото — текст комментария НЕ отправляется; ссылка из поля текста сокращается и вставляется как ссылка на фото</label>
         <label class="chk"><input type="checkbox" id="sProxyForComments" checked> Использовать прокси при отправке комментариев (если выключено — прокси только для регистрации)</label>
         <label class="chk"><input type="checkbox" id="sAutoRegister"> Авто-регистрация при антиспаме — при ошибке 3 (spam) создаёт новый аккаунт</label>
+        <label class="chk"><input type="checkbox" id="sSingleComment"> 1 отправка на аккаунт — после одного комментария сразу регистрирует новый аккаунт</label>
         <label class="chk"><input type="checkbox" id="sSendRandomAfterSpam"> Отправлять рандом-текст после спама (перед созданием нового аккаунта)</label>
+        <label class="chk"><input type="checkbox" id="sFallbackLetters"> Пару букв при спаме текста — если текст заспамлен, отправить случайные буквы (с изображением если есть) и продолжить без перерегистрации</label>
         <label class="chk"><input type="checkbox" id="sDeleteSpecialComments"> Удалять комментарии со спецсимволами (гомоглифы, невидимые символы) после отправки</label>
         <div style="margin-left:20px; margin-top:6px;">
             <input type="text" id="sUsernameTemplate" placeholder="Шаблон: Verification-XXXXXXX" style="max-width:300px; padding:4px 8px; margin-bottom:6px;">
@@ -7881,7 +7915,9 @@ async function sStart() {
     const photo_link = document.getElementById('sPhotoLink').checked;
     const proxy_for_comments = document.getElementById('sProxyForComments').checked;
     const auto_register = document.getElementById('sAutoRegister').checked;
+    const single_comment = document.getElementById('sSingleComment').checked;
     const send_random_after_spam = document.getElementById('sSendRandomAfterSpam').checked;
+    const fallback_letters = document.getElementById('sFallbackLetters').checked;
     const delete_special_comments = document.getElementById('sDeleteSpecialComments').checked;
     const username_template = document.getElementById('sUsernameTemplate').value;
     if (!cookies.trim() && !auto_register) { alert('Вставьте куки (или включите «Авто-регистрация», чтобы каждый поток сам создавал аккаунт)'); return; }
@@ -7937,7 +7973,7 @@ async function sStart() {
     else mail_domain = document.getElementById('sMailDomain').value;
     const mailtd_token = document.getElementById('sMailtdToken').value;
     const smailpro_2captcha_key = document.getElementById('sSmailpro2captchaKey').value;
-    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, reupload_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, send_random_after_spam, delete_special_comments, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
+    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, reupload_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, single_comment, send_random_after_spam, fallback_letters, delete_special_comments, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
 }
 async function sStop() { await daPost('/api/sender_stop', {}); }
 async function sRestart() {
@@ -8371,6 +8407,8 @@ class Handler(BaseHTTPRequestHandler):
             send_random_after_spam = bool(payload.get("send_random_after_spam"))
             delete_special_comments = bool(payload.get("delete_special_comments"))
             reupload_image = bool(payload.get("reupload_image"))
+            single_comment = bool(payload.get("single_comment"))
+            fallback_letters = bool(payload.get("fallback_letters"))
             if payload.get("mailtd_token"):
                 mailtd_set_token(payload["mailtd_token"])
             if payload.get("smailpro_2captcha_key"):
@@ -8383,7 +8421,7 @@ class Handler(BaseHTTPRequestHandler):
                                    auto_register, username_template, avatar_bytes,
                                    proxy_for_comments, s_mail_provider, comment_delay, s_mail_domain,
                                    uniqueify_text, send_random_after_spam, delete_special_comments,
-                                   reupload_image),
+                                   reupload_image, single_comment, fallback_letters),
                              daemon=True).start()
             response = {"ok": True}
 
