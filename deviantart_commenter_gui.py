@@ -1835,15 +1835,15 @@ _LU_PATTERNS = (
 )
 
 
-def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
+def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None, profile=None):
     """Launch Playwright headlessly, navigate to /join/, wait for the AWS WAF
     challenge JS to auto-solve, and extract (csrf_token, lu_token, cookies).
 
-    Confirmed live: the AWS WAF challenge is proof-of-work (no captcha), and
-    Playwright headless clears it in ~4s. Returns (csrf, lu, cookies, err) —
-    cookies is a list of Playwright cookie dicts ready to inject into
-    curl_cffi. The `aws-waf-token` cookie in that list is what lets
-    subsequent curl_cffi requests through without another 202.
+    `profile` is the curl_cffi browser profile (from BROWSER_PROFILES) that
+    will use the resulting WAF cookie. Playwright's User-Agent and sec-ch-ua
+    are forced to match — CloudFront ties the aws-waf-token to the fingerprint
+    that solved it, and using it later from curl_cffi with a different UA is
+    what was causing the mass bot-detect on /join/intent.
     """
     if sync_playwright is None:
         return None, "", None, "Playwright не установлен (pip install playwright)"
@@ -1893,7 +1893,20 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
                     args=_launch_args,
                     ignore_default_args=["--enable-automation"])
             try:
-                context = browser.new_context(ignore_https_errors=True)
+                _ctx_kwargs = {"ignore_https_errors": True}
+                if profile:
+                    _ver = profile["impersonate"].replace("chrome", "")
+                    _ctx_kwargs["user_agent"] = (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        f"Chrome/{_ver}.0.0.0 Safari/537.36")
+                    _ctx_kwargs["extra_http_headers"] = {
+                        "sec-ch-ua": profile["sec-ch-ua"],
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"Windows"',
+                        "accept-language": "en-US,en;q=0.9",
+                    }
+                context = browser.new_context(**_ctx_kwargs)
                 page = context.new_page()
                 page.route("**/*", lambda route: route.abort()
                            if route.request.resource_type in ("image", "font", "media", "stylesheet")
@@ -2023,7 +2036,8 @@ def _fetch_signup_tokens(session, log_fn=None):
                 log_fn("AWS WAF challenge (HTTP 202) — решаю через Playwright...")
             proxy_text = getattr(session, "_proxy_text", None)
             csrf, lu, cookies, err = _solve_awswaf_challenge_via_playwright(
-                proxy_text=proxy_text, log_fn=log_fn)
+                proxy_text=proxy_text, log_fn=log_fn,
+                profile=getattr(session, "_profile", None))
             if csrf:
                 added = _apply_playwright_cookies_to_session(session, cookies)
                 if log_fn:
@@ -4485,7 +4499,8 @@ def da_fetch_csrf(session, log_fn=None, prefix=""):
                     log_fn(f"{prefix} AWS WAF challenge (HTTP 202) — решаю через Playwright...")
                 proxy_text = getattr(session, "_proxy_text", None)
                 p_csrf, _p_lu, cookies, err = _solve_awswaf_challenge_via_playwright(
-                    proxy_text=proxy_text, log_fn=log_fn)
+                    proxy_text=proxy_text, log_fn=log_fn,
+                    profile=getattr(session, "_profile", None))
                 if p_csrf:
                     _apply_playwright_cookies_to_session(session, cookies)
                     return str(p_csrf), ""
