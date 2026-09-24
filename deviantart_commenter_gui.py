@@ -5283,6 +5283,23 @@ def da_get_or_upload_stash_deviation(session, csrf_token, image_bytes, filename,
     return contents[0], True, ""
 
 
+def da_force_upload_stash_deviation(session, csrf_token, image_bytes, cookie_text=None):
+    username, err = da_get_own_username(session, csrf_token, cookie_text)
+    if not username:
+        return None, f"не удалось узнать username: {err}"
+    folderid, err = da_get_stash_folder_id(session, csrf_token, username)
+    if not folderid:
+        return None, f"папка sta.sh не найдена: {err}"
+    rand_name = f"img_{uuid.uuid4().hex[:10]}.png"
+    ok, err = da_upload_stash_image(session, csrf_token, folderid, image_bytes, rand_name)
+    if not ok:
+        return None, f"не удалось загрузить: {err}"
+    contents, err = da_get_stash_contents(session, csrf_token, username, folderid)
+    if not contents:
+        return None, f"загружено, но не удалось получить данные: {err}"
+    return contents[0], ""
+
+
 FEED_POLL_INTERVAL = 20  # seconds between re-fetching the feed page over HTTP
 
 # A pinned sticky-session IP is good for the thread's whole life (see
@@ -6645,7 +6662,8 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                    verify_comment=True, attach_image=False, image_bytes=None, image_filename="",
                    photo_link=False, auto_register=False, username_template="", avatar_bytes=None,
                    proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
-                   uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False):
+                   uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False,
+                   reupload_image=False):
     """Tab 2 worker: pulls from the notebook file (never talks to the parser
     directly), reserving its author in-memory for the duration of the
     attempt so no other thread can double-claim the same author's post at
@@ -6814,6 +6832,14 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
             dev_id = item["deviation_id"]
             url = item["url"]
             key = username.lower()
+
+            if reupload_image and attach_image and image_bytes and image_deviation and not dry_run:
+                new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
+                if new_dev:
+                    image_deviation = new_dev
+                    sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
+                else:
+                    sender_log(f"{prefix} ⚠ Не удалось перезалить изображение: {rerr}")
 
             try:
                 if photo_link:
@@ -7125,7 +7151,8 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                   attach_image=False, image_bytes=None, image_filename="", photo_link=False,
                   auto_register=False, username_template="", avatar_bytes=None,
                   proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
-                  uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False):
+                  uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False,
+                  reupload_image=False):
     """Tab 2: reads from the notebook file the parser tab fills — no feed
     URL of its own, no scrolling, nothing but consuming the notebook.
     """
@@ -7158,6 +7185,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                       if invis_char and invis_count else "")
                    + (f", сокращение ссылок через {'is.gd' if shortener == 'isgd' else 'tr.ee'}" if shortener else "")
                    + (", прикрепление изображения" if attach_image and image_bytes else "")
+                   + (", перезаливка изображения каждый раз" if reupload_image and attach_image else "")
                    + (", ссылка в фото (без текста)" if photo_link else "")
                    + (", каждый поток регистрирует свой аккаунт с нуля" if auto_register and not cookie_text.strip() else "")
                    + (f", задержка между комментариями ~{comment_delay:g} сек" if comment_delay > 0 else ""))
@@ -7177,7 +7205,8 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                                        attach_image, image_bytes, image_filename, photo_link,
                                        auto_register, username_template, avatar_bytes,
                                        proxy_for_comments, mail_provider, comment_delay, mail_domain,
-                                       uniqueify_text, send_random_after_spam, delete_special_comments),
+                                       uniqueify_text, send_random_after_spam, delete_special_comments,
+                                       reupload_image),
                                  daemon=True)
             t.start()
             workers.append(t)
@@ -7359,6 +7388,7 @@ label.chk input { width:auto; }
         <label class="chk"><input type="checkbox" id="sAttachImage"> Прикреплять изображение к комментарию (если в sta.sh аккаунта уже есть картинка — берётся она, иначе загружается выбранный файл один раз)</label>
         <input type="file" id="sImageFile" accept="image/*" style="max-width:320px; margin-bottom:6px;">
         <div id="sImageFileName" style="color:#666; font-size:11px; margin-bottom:6px;"></div>
+        <label class="chk"><input type="checkbox" id="sReuploadImage"> Перезаливать изображение при каждой отправке (новая копия в sta.sh каждый раз — обход антиспама по хешу картинки)</label>
         <label class="chk"><input type="checkbox" id="sPhotoLink"> Ссылка в фото — текст комментария НЕ отправляется; ссылка из поля текста сокращается и вставляется как ссылка на фото</label>
         <label class="chk"><input type="checkbox" id="sProxyForComments" checked> Использовать прокси при отправке комментариев (если выключено — прокси только для регистрации)</label>
         <label class="chk"><input type="checkbox" id="sAutoRegister"> Авто-регистрация при антиспаме — при ошибке 3 (spam) создаёт новый аккаунт</label>
@@ -7846,6 +7876,7 @@ async function sStart() {
     const shortener = document.getElementById('sShortener').value;
     const verify_comment = document.getElementById('sVerifyComment').checked;
     const attach_image = document.getElementById('sAttachImage').checked;
+    const reupload_image = document.getElementById('sReuploadImage').checked;
     const photo_link = document.getElementById('sPhotoLink').checked;
     const proxy_for_comments = document.getElementById('sProxyForComments').checked;
     const auto_register = document.getElementById('sAutoRegister').checked;
@@ -7905,7 +7936,7 @@ async function sStart() {
     else mail_domain = document.getElementById('sMailDomain').value;
     const mailtd_token = document.getElementById('sMailtdToken').value;
     const smailpro_2captcha_key = document.getElementById('sSmailpro2captchaKey').value;
-    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, send_random_after_spam, delete_special_comments, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
+    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, reupload_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, send_random_after_spam, delete_special_comments, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
 }
 async function sStop() { await daPost('/api/sender_stop', {}); }
 async function sRestart() {
@@ -8338,6 +8369,7 @@ class Handler(BaseHTTPRequestHandler):
             uniqueify_text = bool(payload.get("uniqueify_text"))
             send_random_after_spam = bool(payload.get("send_random_after_spam"))
             delete_special_comments = bool(payload.get("delete_special_comments"))
+            reupload_image = bool(payload.get("reupload_image"))
             if payload.get("mailtd_token"):
                 mailtd_set_token(payload["mailtd_token"])
             if payload.get("smailpro_2captcha_key"):
@@ -8349,7 +8381,8 @@ class Handler(BaseHTTPRequestHandler):
                                    attach_image, image_bytes, image_filename, photo_link,
                                    auto_register, username_template, avatar_bytes,
                                    proxy_for_comments, s_mail_provider, comment_delay, s_mail_domain,
-                                   uniqueify_text, send_random_after_spam, delete_special_comments),
+                                   uniqueify_text, send_random_after_spam, delete_special_comments,
+                                   reupload_image),
                              daemon=True).start()
             response = {"ok": True}
 
