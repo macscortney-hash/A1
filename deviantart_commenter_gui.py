@@ -2043,13 +2043,12 @@ def _fetch_signup_tokens(session, log_fn=None):
         return None, "", str(e)[:200]
 
 
-# Global rate limiter: ensures signup2 POSTs are spaced ≥5 s apart across all
-# threads. DA detects bursts of simultaneous signups and blocks most of them
-# — confirmed live that serialising with a delay cuts that from 21/23
-# blocked to ~2-3/23.
+# Global rate limiter: ensures signup2 POSTs are spaced apart across all
+# threads. Reduced to 0.5 s — with 45 threads old 5.0 s caused 225 s waits
+# that expired csrf/lu_token, causing mass bot-detect failures.
 _signup_rate_lock = threading.Lock()
 _signup_last_time = 0.0
-_SIGNUP_MIN_INTERVAL = 5.0  # seconds between successive signup2 POSTs
+_SIGNUP_MIN_INTERVAL = 0.5  # seconds between successive signup2 POSTs
 
 
 def _signup_rate_wait():
@@ -2525,8 +2524,8 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                     if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
                         _using_pool = True
                     if log_prefix:
-                        sender_log(f"{log_prefix} ⚠ DA отклонил signup (бот-детект) — меняю IP, жду 10-20 сек...")
-                    _sleep(random.uniform(10.0, 20.0))
+                        sender_log(f"{log_prefix} ⚠ DA отклонил signup (бот-детект) — меняю IP, жду 2-5 сек...")
+                    _sleep(random.uniform(2.0, 5.0))
                     continue
                 if _is_bad_ip_error(reg_err):
                     _consecutive_ip_fails += 1
@@ -4603,6 +4602,21 @@ def insert_invisible_chars(text, char_key, count):
     return "".join(result)
 
 
+_ALL_HOMOGLYPH_CHARS = None
+
+def _has_special_chars(text):
+    """Return True if text contains any invisible zero-width chars or homoglyph replacements."""
+    global _ALL_HOMOGLYPH_CHARS
+    for ch in ("​", "‌", "‍"):
+        if ch in text:
+            return True
+    if _ALL_HOMOGLYPH_CHARS is None:
+        _ALL_HOMOGLYPH_CHARS = set()
+        for alts in HOMOGLYPHS.values():
+            _ALL_HOMOGLYPH_CHARS.update(alts)
+    return bool(_ALL_HOMOGLYPH_CHARS.intersection(text))
+
+
 # Lookalikes from Cyrillic, Greek, Cherokee, mathematical, roman-numeral and
 # fullwidth blocks. Each ASCII letter maps to several visually indistinct
 # alternatives so successive sends land on different glyphs even for the same
@@ -5041,6 +5055,28 @@ def da_post_comment(session, csrf_token, deviation_id, text, referer_url,
         return False, f"код {resp.status_code}: {resp.text[:400]}{extra}", None
     except Exception as e:
         return False, str(e)[:150], None
+
+
+def da_delete_comment(session, csrf_token, comment_id, deviation_id, referer_url):
+    """Delete a comment by its ID. Returns (ok, err)."""
+    url = "https://www.deviantart.com/_napi/shared_api/comments/delete"
+    payload = {
+        "typeid": 1,
+        "itemid": deviation_id,
+        "commentid": comment_id,
+        "da_minor_version": DA_MINOR_VERSION,
+        "csrf_token": csrf_token,
+    }
+    headers = da_headers()
+    headers["referer"] = referer_url
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    try:
+        resp = session.post(url, headers=headers, data=body, timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 200:
+            return True, ""
+        return False, f"код {resp.status_code}: {resp.text[:300]}"
+    except Exception as e:
+        return False, str(e)[:150]
 
 
 _USERNAME_PATTERNS = (
@@ -5574,7 +5610,7 @@ def distribute_urls(urls, n):
     return [c for c in chunks if c]
 
 
-THREAD_START_STAGGER_SECONDS = 5
+THREAD_START_STAGGER_SECONDS = 1
 
 
 def stagger_before_next_thread(stop_event=None):
@@ -6639,7 +6675,7 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                    verify_comment=True, attach_image=False, image_bytes=None, image_filename="",
                    photo_link=False, auto_register=False, username_template="", avatar_bytes=None,
                    proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
-                   uniqueify_text=False):
+                   uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False):
     """Tab 2 worker: pulls from the notebook file (never talks to the parser
     directly), reserving its author in-memory for the duration of the
     attempt so no other thread can double-claim the same author's post at
@@ -6867,6 +6903,15 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                     else:
                         sender_log(f"{prefix} 📝 Отправленный текст: {verify_needle[:120]}...")
 
+                    if delete_special_comments and posted_comment_id and not photo_link:
+                        if _has_special_chars(text_to_send):
+                            sender_log(f"{prefix} 🗑 Комментарий содержит спецсимволы, удаляю...")
+                            dok, derr = da_delete_comment(session, csrf_token, posted_comment_id, int(dev_id), url)
+                            if dok:
+                                sender_log(f"{prefix} 🗑 Комментарий удалён (спецсимволы)")
+                            else:
+                                sender_log(f"{prefix} ⚠ Не удалось удалить комментарий: {derr[:100]}")
+
                     if verify_comment:
                         verified, verify_msg = verify_comment_posted(
                             int(dev_id), posted_comment_id, raw_proxy_str, src_session=session)
@@ -6963,6 +7008,26 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                             else:
                                 sender_log(f"{prefix} 🔴 Итог: аккаунт целиком в спам-бане на "
                                            f"{username} ({url}) — создаю новый аккаунт...")
+                            if send_random_after_spam:
+                                rnd_text = "".join(random.choices(
+                                    string.ascii_lowercase + string.digits + " ",
+                                    k=random.randint(10, 40)))
+                                sender_log(f"{prefix} 🎲 Отправляю рандом-текст после спама: '{rnd_text[:30]}...'")
+                                try:
+                                    rok, rerr, rid = da_post_comment(
+                                        session, csrf_token, int(dev_id), rnd_text, url, None)
+                                    if rok:
+                                        sender_log(f"{prefix} 🎲 Рандом-текст отправлен")
+                                        if delete_special_comments and rid:
+                                            dok, derr = da_delete_comment(session, csrf_token, rid, int(dev_id), url)
+                                            if dok:
+                                                sender_log(f"{prefix} 🗑 Рандом-комментарий удалён")
+                                            else:
+                                                sender_log(f"{prefix} ⚠ Не удалось удалить рандом-комментарий: {derr[:100]}")
+                                    else:
+                                        sender_log(f"{prefix} 🎲 Рандом-текст тоже отклонён: {(rerr or '')[:100]}")
+                                except Exception as rnd_e:
+                                    sender_log(f"{prefix} ⚠ Ошибка при отправке рандом-текста: {str(rnd_e)[:100]}")
                         else:
                             reason = ("неподтверждённый email" if is_unverified_account_error(cerr)
                                       else "аккаунт разлогинен/забанен" if is_unauthorized_error(cerr)
@@ -7010,6 +7075,14 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                                 sender_log(f"{prefix} 🖼 Фото со ссылкой {verify_needle}")
                             else:
                                 sender_log(f"{prefix} 📝 Отправленный текст: {verify_needle[:120]}...")
+                            if delete_special_comments and posted_comment_id and not photo_link:
+                                if _has_special_chars(text_to_send):
+                                    sender_log(f"{prefix} 🗑 Комментарий содержит спецсимволы, удаляю...")
+                                    dok, derr = da_delete_comment(session, csrf_token, posted_comment_id, int(dev_id), url)
+                                    if dok:
+                                        sender_log(f"{prefix} 🗑 Комментарий удалён (спецсимволы)")
+                                    else:
+                                        sender_log(f"{prefix} ⚠ Не удалось удалить комментарий: {derr[:100]}")
                             if verify_comment:
                                 verified, verify_msg = verify_comment_posted(
                                     int(dev_id), posted_comment_id, raw_proxy_str, src_session=session)
@@ -7072,7 +7145,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                   attach_image=False, image_bytes=None, image_filename="", photo_link=False,
                   auto_register=False, username_template="", avatar_bytes=None,
                   proxy_for_comments=True, mail_provider=None, comment_delay=0, mail_domain=None,
-                  uniqueify_text=False):
+                  uniqueify_text=False, send_random_after_spam=False, delete_special_comments=False):
     """Tab 2: reads from the notebook file the parser tab fills — no feed
     URL of its own, no scrolling, nothing but consuming the notebook.
     """
@@ -7124,7 +7197,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
                                        attach_image, image_bytes, image_filename, photo_link,
                                        auto_register, username_template, avatar_bytes,
                                        proxy_for_comments, mail_provider, comment_delay, mail_domain,
-                                       uniqueify_text),
+                                       uniqueify_text, send_random_after_spam, delete_special_comments),
                                  daemon=True)
             t.start()
             workers.append(t)
@@ -7309,6 +7382,8 @@ label.chk input { width:auto; }
         <label class="chk"><input type="checkbox" id="sPhotoLink"> Ссылка в фото — текст комментария НЕ отправляется; ссылка из поля текста сокращается и вставляется как ссылка на фото</label>
         <label class="chk"><input type="checkbox" id="sProxyForComments" checked> Использовать прокси при отправке комментариев (если выключено — прокси только для регистрации)</label>
         <label class="chk"><input type="checkbox" id="sAutoRegister"> Авто-регистрация при антиспаме — при ошибке 3 (spam) создаёт новый аккаунт</label>
+        <label class="chk"><input type="checkbox" id="sSendRandomAfterSpam"> Отправлять рандом-текст после спама (перед созданием нового аккаунта)</label>
+        <label class="chk"><input type="checkbox" id="sDeleteSpecialComments"> Удалять комментарии со спецсимволами (гомоглифы, невидимые символы) после отправки</label>
         <div style="margin-left:20px; margin-top:6px;">
             <input type="text" id="sUsernameTemplate" placeholder="Шаблон: Verification-XXXXXXX" style="max-width:300px; padding:4px 8px; margin-bottom:6px;">
             <div style="font-size:11px; color:#666; margin-bottom:6px;">Вместо XXXXXXX подставится 7-цифровой счётчик (0000000, 0000001, ...)</div>
@@ -7550,6 +7625,8 @@ function daSaveState() {
             sPhotoLink: _daGetChk('sPhotoLink'),
             sProxyForComments: _daGetChk('sProxyForComments'),
             sAutoRegister: _daGetChk('sAutoRegister'),
+            sSendRandomAfterSpam: _daGetChk('sSendRandomAfterSpam'),
+            sDeleteSpecialComments: _daGetChk('sDeleteSpecialComments'),
             sUsernameTemplate: _daGetVal('sUsernameTemplate'),
             sMailProvider: _daGetVal('sMailProvider'),
             sMailDomain: _daGetVal('sMailDomain'),
@@ -7604,6 +7681,8 @@ function daApplyState(s) {
     if ('sPhotoLink' in s) _daChk('sPhotoLink', s.sPhotoLink);
     if ('sProxyForComments' in s) _daChk('sProxyForComments', s.sProxyForComments);
     if ('sAutoRegister' in s) _daChk('sAutoRegister', s.sAutoRegister);
+    if ('sSendRandomAfterSpam' in s) _daChk('sSendRandomAfterSpam', s.sSendRandomAfterSpam);
+    if ('sDeleteSpecialComments' in s) _daChk('sDeleteSpecialComments', s.sDeleteSpecialComments);
     if ('sUsernameTemplate' in s) _daSet('sUsernameTemplate', s.sUsernameTemplate);
     if ('sMailProvider' in s) _daSet('sMailProvider', s.sMailProvider);
     if ('sMailDomain' in s) _daSet('sMailDomain', s.sMailDomain);
@@ -7790,6 +7869,8 @@ async function sStart() {
     const photo_link = document.getElementById('sPhotoLink').checked;
     const proxy_for_comments = document.getElementById('sProxyForComments').checked;
     const auto_register = document.getElementById('sAutoRegister').checked;
+    const send_random_after_spam = document.getElementById('sSendRandomAfterSpam').checked;
+    const delete_special_comments = document.getElementById('sDeleteSpecialComments').checked;
     const username_template = document.getElementById('sUsernameTemplate').value;
     if (!cookies.trim() && !auto_register) { alert('Вставьте куки (или включите «Авто-регистрация», чтобы каждый поток сам создавал аккаунт)'); return; }
     if (!dry_run && !comment_text.trim()) { alert(photo_link ? 'Вставьте ссылку в поле текста (она пойдёт в фото)' : 'Введите текст комментария'); return; }
@@ -7843,7 +7924,7 @@ async function sStart() {
     else mail_domain = document.getElementById('sMailDomain').value;
     const mailtd_token = document.getElementById('sMailtdToken').value;
     const smailpro_2captcha_key = document.getElementById('sSmailpro2captchaKey').value;
-    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
+    await daPost('/api/sender_start', { cookies, csrf_token, proxy, comment_text, threads, comment_delay, ignore_blacklist, dry_run, use_live_proxies, invis_char, invis_count, uniqueify_text, shortener, verify_comment, attach_image, image_data: image_data, image_filename, photo_link, proxy_for_comments, auto_register, send_random_after_spam, delete_special_comments, username_template, avatar_data, mail_provider, mail_domain, mailtd_token, smailpro_2captcha_key });
 }
 async function sStop() { await daPost('/api/sender_stop', {}); }
 async function sRestart() {
@@ -8274,6 +8355,8 @@ class Handler(BaseHTTPRequestHandler):
             s_mail_provider = payload.get("mail_provider") or None
             s_mail_domain = payload.get("mail_domain") or None
             uniqueify_text = bool(payload.get("uniqueify_text"))
+            send_random_after_spam = bool(payload.get("send_random_after_spam"))
+            delete_special_comments = bool(payload.get("delete_special_comments"))
             if payload.get("mailtd_token"):
                 mailtd_set_token(payload["mailtd_token"])
             if payload.get("smailpro_2captcha_key"):
@@ -8285,7 +8368,7 @@ class Handler(BaseHTTPRequestHandler):
                                    attach_image, image_bytes, image_filename, photo_link,
                                    auto_register, username_template, avatar_bytes,
                                    proxy_for_comments, s_mail_provider, comment_delay, s_mail_domain,
-                                   uniqueify_text),
+                                   uniqueify_text, send_random_after_spam, delete_special_comments),
                              daemon=True).start()
             response = {"ok": True}
 
