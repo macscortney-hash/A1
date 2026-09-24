@@ -6769,27 +6769,54 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
 
         image_deviation = None
         if attach_image and image_bytes and not dry_run:
-            # A pooled account has already sent at least one comment before, so
-            # its sta.sh folder is already provisioned — only a truly fresh
-            # registration needs the init-wait retries.
             is_truly_new_account = is_fresh_account and not used_pool_account
-            if is_truly_new_account:
-                sender_log(f"{prefix} ⏳ Свежий аккаунт — жду инициализации sta.sh перед загрузкой изображения...")
-            deviation, was_uploaded, err = da_get_or_upload_stash_deviation(
-                session, csrf_token, image_bytes, image_filename or "image.png", cookie_text,
-                new_account=is_truly_new_account)
-            if deviation:
-                image_deviation = deviation
-                if was_uploaded:
-                    sender_log(f"{prefix} 🖼 Изображение загружено в sta.sh и будет прикрепляться к комментариям")
+            _stash_attempts = 0
+            _STASH_MAX_RETRIES = 3
+            while image_deviation is None:
+                if stop_event and stop_event.is_set():
+                    return
+                _stash_attempts += 1
+                if is_truly_new_account:
+                    sender_log(f"{prefix} ⏳ Свежий аккаунт — жду инициализации sta.sh перед загрузкой изображения...")
+                _need_stash_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
+                if _need_stash_proxy:
+                    _stag = "st" + uuid.uuid4().hex[:10]
+                    _sproxy = with_sticky_session(raw_proxy_str, _stag, lifetime_minutes=5)
+                    apply_proxy_to_session(session, _sproxy)
+                deviation, was_uploaded, err = da_get_or_upload_stash_deviation(
+                    session, csrf_token, image_bytes, image_filename or "image.png", cookie_text,
+                    new_account=is_truly_new_account)
+                if _need_stash_proxy:
+                    clear_session_proxy(session)
+                if deviation:
+                    image_deviation = deviation
+                    if was_uploaded:
+                        sender_log(f"{prefix} 🖼 Изображение загружено в sta.sh и будет прикрепляться к комментариям")
+                    else:
+                        sender_log(f"{prefix} 🖼 В sta.sh уже есть изображение — использую его для прикрепления")
                 else:
-                    sender_log(f"{prefix} 🖼 В sta.sh уже есть изображение — использую его для прикрепления")
-            else:
-                # Image attachment was requested but couldn't be prepared —
-                # do NOT fall back to posting without it. Stop this worker.
-                sender_log(f"{prefix} 🔴 ОШИБКА: не удалось подготовить изображение: {err}")
-                sender_log(f"{prefix} ⛔ Прикрепление изображения включено — отправка без картинки отменена, поток остановлен")
-                return
+                    sender_log(f"{prefix} 🔴 Не удалось подготовить изображение (попытка {_stash_attempts}): {err}")
+                    if _stash_attempts >= _STASH_MAX_RETRIES:
+                        if auto_register and username_template:
+                            sender_log(f"{prefix} 🔄 Изображение не загружается — регистрирую новый аккаунт...")
+                            new_s, new_c, new_id, reg_err = _reregister_account_for_thread(
+                                prefix, raw_proxy_str, username_template, avatar_bytes, proxy_for_comments,
+                                mail_provider, mail_domain, attach_image, image_bytes, image_filename,
+                                stop_event=stop_event)
+                            if new_s:
+                                session = new_s
+                                csrf_token = new_c
+                                image_deviation = new_id
+                                account_healthy = False
+                                used_pool_account = False
+                            else:
+                                sender_log(f"{prefix} ❌ {reg_err}")
+                                return
+                        else:
+                            sender_log(f"{prefix} ⛔ Изображение не загружается — поток остановлен")
+                            return
+                    else:
+                        time.sleep(random.uniform(3, 6))
 
         # "Link in photo" mode needs a prepared photo to attach the link to.
         if photo_link and not dry_run and not image_deviation:
