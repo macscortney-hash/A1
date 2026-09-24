@@ -64,6 +64,13 @@ try:
 except ImportError:
     sync_playwright = None
 
+# Cap concurrent Chromium instances. With 20+ threads all launching Playwright
+# at once for WAF solving, they thrash CPU/memory and each takes far longer
+# than it would running alone — measured live: 6 concurrent finish in ~6s
+# each; 20 concurrent stall past 60s and start timing out. 8 keeps GUI thread
+# responsive while still parallelizing solves.
+_PLAYWRIGHT_SEMAPHORE = threading.BoundedSemaphore(8)
+
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -1867,6 +1874,12 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
         "--allow-running-insecure-content",
         "--blink-settings=imagesEnabled=false",
     ]
+    # Wait behind the semaphore so we don't have 20+ Chromium instances
+    # fighting for CPU. Bounded wait — if we can't get a slot in 30s the
+    # caller (a per-account retry loop) is better off rotating IP than
+    # blocking here indefinitely.
+    if not _PLAYWRIGHT_SEMAPHORE.acquire(timeout=30):
+        return None, "", None, "Playwright: слот занят >30с (перегрузка)"
     try:
         with sync_playwright() as pw:
             try:
@@ -1883,27 +1896,24 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
                 context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
                 page.route("**/*", lambda route: route.abort()
-                           if route.request.resource_type in ("image", "font", "media")
+                           if route.request.resource_type in ("image", "font", "media", "stylesheet")
                            else route.continue_())
                 try:
-                    # Longer timeout for slow free proxies — the challenge
-                    # JS needs a few seconds just to load through them.
+                    # 45s cap on the initial load — proxies that need longer
+                    # are almost always dead; failing fast lets the caller
+                    # rotate to a working IP instead of stalling this thread.
                     page.goto("https://www.deviantart.com/join/",
-                              timeout=90000, wait_until="domcontentloaded")
+                              timeout=45000, wait_until="domcontentloaded")
                 except Exception as e:
                     return None, "", None, f"Playwright goto: {str(e)[:150]}"
 
                 csrf = None
                 lu = ""
-                # Poll up to 120s. Through a slow free proxy the AWS WAF
-                # proof-of-work JS routinely takes 30-90s: the challenge
-                # itself is CPU-cheap but each intermediate fetch (to
-                # awswaf.com's token endpoint and back) rides the proxy's
-                # RTT, and slow proxies pile up multiple seconds per round
-                # trip. Confirmed live: `41.196.16.234:1976` (1081ms RTT)
-                # took ~70s to finalize.
-                for _ in range(240):
-                    page.wait_for_timeout(500)
+                # Poll up to 60s (was 120s). If challenge hasn't finished by
+                # then the proxy is too slow to be useful — rotate faster.
+                # 300ms polls (was 500ms) grab the csrf sooner on fast proxies.
+                for _ in range(200):
+                    page.wait_for_timeout(300)
                     try:
                         html = page.content()
                     except Exception:
@@ -1932,7 +1942,7 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
                         break
 
                 if not csrf:
-                    return None, "", None, "Playwright не смог получить csrf (challenge не прошёл за 120с)"
+                    return None, "", None, "Playwright не смог получить csrf (challenge не прошёл за 60с)"
 
                 cookies = context.cookies()
                 return str(csrf), str(lu or ""), cookies, ""
@@ -1943,6 +1953,8 @@ def _solve_awswaf_challenge_via_playwright(proxy_text=None, log_fn=None):
                     pass
     except Exception as e:
         return None, "", None, f"Playwright исключение: {str(e)[:200]}"
+    finally:
+        _PLAYWRIGHT_SEMAPHORE.release()
 
 
 def _apply_playwright_cookies_to_session(session, cookies):
@@ -2492,8 +2504,8 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                     if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
                         _using_pool = True
                     if log_prefix:
-                        sender_log(f"{log_prefix} ⚠ DA отклонил signup (бот-детект) — меняю IP, жду 2-5 сек...")
-                    _sleep(random.uniform(2.0, 5.0))
+                        sender_log(f"{log_prefix} ⚠ DA отклонил signup (бот-детект) — меняю IP...")
+                    _sleep(random.uniform(0.5, 1.5))
                     continue
                 if _is_bad_ip_error(reg_err):
                     _consecutive_ip_fails += 1
@@ -2504,7 +2516,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                         _using_pool = True
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ Проблема с IP/соединением — беру другой IP...")
-                    _sleep(random.uniform(2.0, 5.0))
+                    _sleep(random.uniform(0.5, 1.5))
                     continue
                 _consecutive_ip_fails += 1
                 if _pool_addr:
@@ -2513,7 +2525,7 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                     _using_pool = True
                 if log_prefix:
                     sender_log(f"{log_prefix} ⚠ Ошибка регистрации: {(reg_err or '')[:150]} — пробую снова с другим IP...")
-                _sleep(random.uniform(5.0, 10.0))
+                _sleep(random.uniform(1.5, 3.0))
                 continue
             _consecutive_ip_fails = 0
             if reg_err and log_prefix:
