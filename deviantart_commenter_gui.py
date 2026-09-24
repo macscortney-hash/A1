@@ -2209,7 +2209,6 @@ def da_register_account(session, email, username, mail_provider=None, mail_ctx=N
                     sisu_csrf = _m.group(1)
                     break
 
-        clear_session_proxy(session)
         _log("onboarding...")
         if sisu_csrf:
             try:
@@ -2576,10 +2575,10 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
 
             if pinned_proxy_str:
                 if keep_proxy_for_comments:
-                    apply_proxy_to_session(new_session, pinned_proxy_str)
                     if log_prefix:
-                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси включён обратно для комментариев")
+                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси остаётся для комментариев")
                 else:
+                    clear_session_proxy(new_session)
                     if log_prefix:
                         sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси отключен, дальше работаю напрямую")
 
