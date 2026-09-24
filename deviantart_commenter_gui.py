@@ -2459,10 +2459,9 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
             if pinned_proxy_str:
                 apply_proxy_to_session(session, pinned_proxy_str)
                 session._proxy_text = pinned_proxy_str
-                tempmailorg_set_proxy(pinned_proxy_str)
             else:
                 session._proxy_text = None
-                tempmailorg_set_proxy(None)
+            tempmailorg_set_proxy(None)
 
             _log_fn = (lambda msg: sender_log(f"{log_prefix} {msg}")) if log_prefix else None
             use_auto = (_effective_mail_provider or "").lower() in ("auto", "")
@@ -2562,6 +2561,9 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 _sleep(random.uniform(2.0, 5.0))
                 continue
 
+            if pinned_proxy_str:
+                clear_session_proxy(new_session)
+
             if avatar_bytes:
                 ok, err = da_set_avatar(new_session, csrf_token, avatar_bytes, "avatar.jpg")
                 if log_prefix:
@@ -2575,10 +2577,10 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
 
             if pinned_proxy_str:
                 if keep_proxy_for_comments:
+                    apply_proxy_to_session(new_session, pinned_proxy_str)
                     if log_prefix:
-                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси остаётся для комментариев")
+                        sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси включён для комментариев")
                 else:
-                    clear_session_proxy(new_session)
                     if log_prefix:
                         sender_log(f"{log_prefix} 🔌 Регистрация завершена — прокси отключен, дальше работаю напрямую")
 
