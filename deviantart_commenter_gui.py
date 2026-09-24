@@ -2460,6 +2460,15 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                 session._proxy_text = None
                 tempmailorg_set_proxy(None)
 
+            if log_prefix and ip_attempt <= 3:
+                try:
+                    _ip_r = session.get("https://httpbin.org/ip", timeout=10)
+                    _exit_ip = _ip_r.json().get("origin", "?")
+                    _proxy_label = pinned_proxy_str.strip()[:40] if pinned_proxy_str else "НЕТ"
+                    sender_log(f"{log_prefix} 🔍 Диагностика: выходной IP={_exit_ip}, прокси={_proxy_label}, session.proxies={bool(session.proxies)}")
+                except Exception as _diag_e:
+                    sender_log(f"{log_prefix} 🔍 Диагностика: не удалось определить IP ({_diag_e.__class__.__name__}), прокси={pinned_proxy_str and 'ДА' or 'НЕТ'}")
+
             _log_fn = (lambda msg: sender_log(f"{log_prefix} {msg}")) if log_prefix else None
             use_auto = (_effective_mail_provider or "").lower() in ("auto", "")
             if use_auto:
@@ -3574,57 +3583,13 @@ def nav_h(session):
 # latency, and hands out the fastest available one on demand. All state is
 # persisted to disk so a restart resumes from the last known-good pool.
 DA_PROXY_SOURCES = [
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
-    "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
-    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
-    "https://raw.githubusercontent.com/andigwandi/free-proxy/main/proxy_list.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt",
     "https://raw.githubusercontent.com/casals-ar/proxy-list/main/http",
     "https://raw.githubusercontent.com/casals-ar/proxy-list/main/https",
-    "https://raw.githubusercontent.com/yemixzy/proxy-list/main/proxies/unchecked.txt",
-    "https://raw.githubusercontent.com/berkay-digital/Proxy-Scraper/main/proxies.txt",
-    "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=5000&country=all",
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000",
-    "https://www.proxy-list.download/api/v1/get?type=http",
-    "https://www.proxy-list.download/api/v1/get?type=https",
-    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
-    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/https/https.txt",
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
     "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
-    "https://raw.githubusercontent.com/UptimerBot/proxy-list/main/proxies/http.txt",
     "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
     "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
-    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
-    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
-    "https://raw.githubusercontent.com/HyperBeats/proxy-list/main/http.txt",
-    "https://raw.githubusercontent.com/HyperBeats/proxy-list/main/https.txt",
-    "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt",
-    "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt",
-    "https://raw.githubusercontent.com/BlackSnowDot/proxylist-update-every-minute/main/http.txt",
-    "https://raw.githubusercontent.com/BlackSnowDot/proxylist-update-every-minute/main/https.txt",
-    "https://raw.githubusercontent.com/RX4096/proxy-list/main/online/http.txt",
-    "https://raw.githubusercontent.com/saisuiu/uiu/main/free.txt",
     "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/http.txt",
-    "https://raw.githubusercontent.com/miroslavpejic85/proxy-list/master/proxy_list.txt",
-    "https://raw.githubusercontent.com/mishakorzik/Free-Proxy/main/proxy.txt",
-    "https://raw.githubusercontent.com/opsxcq/proxy-list/master/list.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/https_proxies.txt",
-    "https://raw.githubusercontent.com/xrival/proxies-server/main/http.txt",
-    "https://raw.githubusercontent.com/GhostxOP/Ghost_proxies/main/Http.txt",
-    "https://openproxylist.xyz/http.txt",
-    "https://api.openproxylist.xyz/http.txt",
 ]
 
 DA_POOL_STATE_FILE = BASE_DIR / "da_proxy_pool_state.json"
@@ -3891,39 +3856,6 @@ class ProxyPool:
             except Exception:
                 pass
 
-    @staticmethod
-    def _is_datacenter_ip(ip):
-        """Filter out Cloudflare, AWS CloudFront and other known CDN/datacenter
-        IP ranges that DA instantly rejects for registration."""
-        parts = ip.split(".")
-        if len(parts) != 4:
-            return False
-        try:
-            a, b = int(parts[0]), int(parts[1])
-        except ValueError:
-            return False
-        if a == 104 and 16 <= b <= 31:
-            return True
-        if a == 172 and 64 <= b <= 71:
-            return True
-        if a == 141 and b == 101:
-            return True
-        if a == 162 and b == 158:
-            return True
-        if a == 173 and b == 245:
-            return True
-        if a == 188 and b == 114:
-            return True
-        if a == 190 and b == 93:
-            return True
-        if a == 197 and b == 234:
-            return True
-        if a == 198 and b == 41:
-            return True
-        if a == 131 and b == 0:
-            return True
-        return False
-
     def _fetch_proxies(self):
         self._fetching = True
         all_addrs = set()
@@ -3948,10 +3880,6 @@ class ProxyPool:
             except Exception:
                 pass
         with self.lock:
-            # Enforce DA_POOL_MAX_SIZE: if pool would grow past cap, evict
-            # oldest dead entries first (they've had their chance and been
-            # tried recently), then oldest unchecked. Alive entries never
-            # get evicted here — they're the whole point.
             free_slots = DA_POOL_MAX_SIZE - len(self.proxies)
             if free_slots < len(all_addrs):
                 to_free = len(all_addrs) - free_slots
@@ -3972,8 +3900,6 @@ class ProxyPool:
                     break
                 ip = self._ip_of(addr)
                 if ip in self._burned_ips:
-                    continue
-                if self._is_datacenter_ip(ip):
                     continue
                 if addr not in self.proxies:
                     self.proxies[addr] = {"addr": addr, "latency": -1, "status": "unchecked",
@@ -4023,24 +3949,11 @@ class ProxyPool:
     def _check_one_addr(self, addr):
         """Return (latency_ms, status).
 
-        Confirmed live on 30 random free proxies: DA/CloudFront responds in
-        one of three shapes when a proxy reaches it — 202 with the AWS WAF
-        challenge (best; Playwright solver handles it), 403 with
-        ``server: CloudFront`` (proxy IP is on CF's blocklist but the proxy
-        itself functions and reaches DA), or 200/3xx (rare, usually behind a
-        residential IP). Any of those means the TCP path proxy → CDN is
-        healthy — that's what "alive" means here. Connection errors,
-        timeouts, 5xx, or responses without a CloudFront/DA signature mean
-        the proxy is broken (or intercepting our traffic and returning its
-        own garbage page).
-
-        Ranking within alive is by latency, so proxies that get through to a
-        real 202/200 still win the ordering even when the pool has thousands
-        of 403-blocked entries.
+        Super-lightweight check: dead only if the proxy truly cannot connect
+        (timeout, connection refused, 5xx). Everything else — including
+        403/429 from CloudFront — counts as alive. The registration code
+        itself decides which proxies actually work for signup.
         """
-        ip = self._ip_of(addr)
-        if self._is_datacenter_ip(ip):
-            return -1, "dead"
         proxy = {"http": f"http://{addr}", "https": f"http://{addr}"}
         ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                              "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -4056,30 +3969,9 @@ class ProxyPool:
         except Exception:
             return -1, "dead"
         ms = round((time.time() - t0) * 1000)
-        code = r.status_code
-        if 500 <= code < 600:
+        if 500 <= r.status_code < 600:
             return -1, "dead"
-
-        server_hdr = (r.headers.get("server") or "").lower()
-        waf_hdr = r.headers.get("x-amzn-waf-action") or ""
-        body_lo = (r.text or "")[:2000].lower() if r.text else ""
-
-        reached_da = (
-            "cloudfront" in server_hdr
-            or waf_hdr == "challenge"
-            or "awswaf" in body_lo
-            or "deviantart" in body_lo
-        )
-
-        if code in (200, 301, 302, 303, 307, 308):
-            return ms, "alive"
-        if code == 202 and reached_da:
-            return ms, "alive"
-        if code == 403 and reached_da:
-            return ms, "cf_blocked"
-        if code == 429 and reached_da:
-            return ms, "cf_blocked"
-        return -1, "dead"
+        return ms, "alive"
 
     def _check_worker(self):
         with self.lock:
