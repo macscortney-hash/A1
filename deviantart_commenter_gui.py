@@ -3623,14 +3623,7 @@ DA_PROXY_SOURCES = [
 ]
 
 DA_POOL_STATE_FILE = BASE_DIR / "da_proxy_pool_state.json"
-# We check against DA directly (not httpbin/ipify) because free proxies to
-# neutral endpoints failed at ~0/20 on live samples — httpbin's rate-limited
-# and free proxies to it get 429/timeout. DA's CDN, in contrast, tolerates a
-# lot more traffic; the classification just has to be permissive enough to
-# treat a 403-from-CloudFront as "reaches DA" (proxy IP is on CF's blocklist
-# but the proxy itself functions). Workers then filter that finer via
-# mark_bad when the actual registration flow bounces.
-DA_POOL_CHECK_URL = "https://www.deviantart.com/"
+DA_POOL_ANON_CHECK_URL = "http://api.ipify.org/"
 DA_POOL_CHECK_TIMEOUT = 15
 DA_POOL_CHECK_WORKERS = 120
 DA_POOL_TARGET_ALIVE = 100
@@ -3665,6 +3658,8 @@ class ProxyPool:
         self._active_checkers = 0
         self._fetch_lock = threading.Lock()
         self._cursor = 0
+        self._direct_ip = None
+        self._direct_ip_ts = 0
 
     def start(self):
         if self._started:
@@ -3976,14 +3971,32 @@ class ProxyPool:
             self._cursor = (start + SCAN) % n
         return None
 
+    def _ensure_direct_ip(self):
+        if self._direct_ip and (time.time() - self._direct_ip_ts < 600):
+            return
+        http_mod = requests or curl_requests
+        if not http_mod:
+            return
+        for url in ("http://api.ipify.org/", "http://ifconfig.me/ip",
+                     "http://icanhazip.com/"):
+            try:
+                r = http_mod.get(url, timeout=10)
+                ip = r.text.strip().split(",")[0].strip()
+                if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip):
+                    self._direct_ip = ip
+                    self._direct_ip_ts = time.time()
+                    return
+            except Exception:
+                continue
+
     def _check_one_addr(self, addr):
         """Return (latency_ms, status).
 
-        Super-lightweight check: dead only if the proxy truly cannot connect
-        (timeout, connection refused, 5xx). Everything else — including
-        403/429 from CloudFront — counts as alive. The registration code
-        itself decides which proxies actually work for signup.
+        Anonymity check: request an IP-echo service through the proxy.
+        Dead if: can't connect, response isn't a valid IP (not a real proxy),
+        or exit IP equals our direct IP (transparent proxy — useless).
         """
+        self._ensure_direct_ip()
         proxy = {"http": f"http://{addr}", "https": f"http://{addr}"}
         ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                              "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -3993,14 +4006,19 @@ class ProxyPool:
             return -1, "dead"
         try:
             t0 = time.time()
-            r = http_mod.get(DA_POOL_CHECK_URL, proxies=proxy,
+            r = http_mod.get(DA_POOL_ANON_CHECK_URL, proxies=proxy,
                              timeout=DA_POOL_CHECK_TIMEOUT,
-                             allow_redirects=False, headers=ua,
+                             allow_redirects=True, headers=ua,
                              verify=False)
         except Exception:
             return -1, "dead"
         ms = round((time.time() - t0) * 1000)
-        if 500 <= r.status_code < 600:
+        if r.status_code != 200:
+            return -1, "dead"
+        exit_ip = (r.text or "").strip().split(",")[0].strip()
+        if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', exit_ip):
+            return -1, "dead"
+        if self._direct_ip and exit_ip == self._direct_ip:
             return -1, "dead"
         return ms, "alive"
 
@@ -7135,7 +7153,7 @@ def sender_worker(cookie_text, comment_text, thread_count, ignore_blacklist,
         if auto_register and not username_template.strip():
             sender_log("⚠️ Для авто-регистрации укажите шаблон имени пользователя")
             return
-        if not dry_run and not comment_text.strip() and not photo_link:
+        if not dry_run and not comment_text.strip() and not photo_link and not attach_image:
             sender_log("⚠️ Введите текст комментария")
             return
         thread_count = max(1, int(thread_count or 1))
