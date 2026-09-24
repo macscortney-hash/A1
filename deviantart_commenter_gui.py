@@ -2029,6 +2029,8 @@ def _fetch_signup_tokens(session, log_fn=None):
             if m:
                 return m.group(1), lu, ""
 
+        if resp.status_code == 403:
+            return None, "", "request could not be satisfied — /join/ вернул HTTP 403 (IP заблокирован)"
         return None, "", f"Не удалось найти csrfToken на /join/ (HTTP {resp.status_code})"
     except Exception as e:
         return None, "", str(e)[:200]
@@ -2345,6 +2347,20 @@ def _is_bad_ip_error(err_text):
     return CLOUDFRONT_BLOCK_MARKER in low or any(m in low for m in PROXY_CONNECTION_ERROR_MARKERS)
 
 
+def _is_plain_proxy(proxy_text):
+    """True when proxy_text is a bare host:port with no auth credentials —
+    sticky sessions don't work on these, so retrying the same string just
+    hits the same IP over and over."""
+    text = (proxy_text or "").strip()
+    if not text:
+        return True
+    if "://" in text:
+        _, text = text.split("://", 1)
+    if "@" in text:
+        return False
+    return len(text.split(":")) < 4
+
+
 def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_prefix="", keep_proxy_for_comments=True, mail_provider=None, mail_domain=None, stop_event=None):
     """Build a brand-new session from scratch: no pasted cookies needed.
     Generates a temp email, registers a fresh account (username from the
@@ -2379,6 +2395,12 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
     # callers can cap it lower (see spam_strategy_test.py — needs 3 so a
     # single dead pool proxy doesn't burn 50 temp emails).
     MAX_IP_ATTEMPTS = globals().get("MAX_IP_ATTEMPTS_OVERRIDE") or 50
+    _is_plain = has_proxy and _is_plain_proxy(proxy_text)
+    _POOL_FALLBACK_AFTER = 10
+    _consecutive_ip_fails = 0
+    _using_pool = False
+    _pool_logged = False
+    _pool_addr = None
     _effective_mail_provider = mail_provider
     _stop = stop_event or sender_state.get("stop")
 
@@ -2400,11 +2422,24 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
             return None, "", f"превышен лимит попыток регистрации ({MAX_IP_ATTEMPTS})", None
         ip_attempt += 1
         pinned_proxy_str = None
-        if has_proxy:
+        _pool_addr = None
+        effective_proxy = proxy_text if has_proxy else ""
+        if has_proxy and (_is_plain or _using_pool):
+            _pa = PROXY_POOL.get_best()
+            if _pa:
+                effective_proxy = _pa
+                _pool_addr = _pa
+                if _using_pool and not _pool_logged and log_prefix:
+                    sender_log(f"{log_prefix} 🔄 Основной прокси не работает ({_consecutive_ip_fails} ошибок подряд) — пробую прокси из пула")
+                    _pool_logged = True
+            elif log_prefix and ip_attempt % 10 == 0:
+                sender_log(f"{log_prefix} ⚠ Пул прокси пуст — нет живых альтернатив")
+        if effective_proxy and effective_proxy.strip():
             sticky_tag = "da" + uuid.uuid4().hex[:10]
-            pinned_proxy_str = with_sticky_session(proxy_text, sticky_tag)
+            pinned_proxy_str = with_sticky_session(effective_proxy, sticky_tag)
             if log_prefix:
-                sender_log(f"{log_prefix} 📌 [попытка {ip_attempt}] Новый IP (sessid-{sticky_tag})")
+                src = " (пул)" if _pool_addr else ""
+                sender_log(f"{log_prefix} 📌 [попытка {ip_attempt}] Новый IP{src} (sessid-{sticky_tag})")
 
         try:
             profile = pick_browser_profile()
@@ -2477,19 +2512,35 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
                         sender_log(f"{log_prefix} ⚠ Имя «{new_username}» уже занято — пробую другой номер...")
                     continue
                 if "auth cookies отсутствуют" in (reg_err or ""):
+                    _consecutive_ip_fails += 1
+                    if _pool_addr:
+                        PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=600)
+                    if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
+                        _using_pool = True
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ DA отклонил signup (бот-детект) — меняю IP, жду 10-20 сек...")
                     _sleep(random.uniform(10.0, 20.0))
                     continue
                 if _is_bad_ip_error(reg_err):
+                    _consecutive_ip_fails += 1
+                    if _pool_addr:
+                        PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=600)
+                    if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
+                        _using_pool = True
                     if log_prefix:
                         sender_log(f"{log_prefix} ⚠ Проблема с IP/соединением — беру другой IP...")
                     _sleep(random.uniform(2.0, 5.0))
                     continue
+                _consecutive_ip_fails += 1
+                if _pool_addr:
+                    PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=300)
+                if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
+                    _using_pool = True
                 if log_prefix:
                     sender_log(f"{log_prefix} ⚠ Ошибка регистрации: {(reg_err or '')[:150]} — пробую снова с другим IP...")
                 _sleep(random.uniform(5.0, 10.0))
                 continue
+            _consecutive_ip_fails = 0
             if reg_err and log_prefix:
                 sender_log(f"{log_prefix} ⚠ {reg_err}")
 
@@ -2529,6 +2580,11 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
         except Exception as e:
             if _stopped():
                 return None, "", "остановлено пользователем", None
+            _consecutive_ip_fails += 1
+            if _pool_addr:
+                PROXY_POOL.mark_bad(_pool_addr, ttl_seconds=300)
+            if not _is_plain and not _using_pool and _consecutive_ip_fails >= _POOL_FALLBACK_AFTER:
+                _using_pool = True
             last_err = str(e)[:150]
             if log_prefix:
                 sender_log(f"{log_prefix} ⚠ Исключение: {last_err} — пробую снова...")
