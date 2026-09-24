@@ -2462,8 +2462,8 @@ def da_fresh_account_session(proxy_text, username_template, avatar_bytes, log_pr
 
             if log_prefix and ip_attempt <= 3:
                 try:
-                    _ip_r = session.get("https://httpbin.org/ip", timeout=10)
-                    _exit_ip = _ip_r.json().get("origin", "?")
+                    _ip_r = session.get("https://api.ipify.org/", timeout=10, verify=False)
+                    _exit_ip = _ip_r.text.strip()
                     _proxy_label = pinned_proxy_str.strip()[:40] if pinned_proxy_str else "НЕТ"
                     sender_log(f"{log_prefix} 🔍 Диагностика: выходной IP={_exit_ip}, прокси={_proxy_label}, session.proxies={bool(session.proxies)}")
                 except Exception as _diag_e:
@@ -3623,7 +3623,7 @@ DA_PROXY_SOURCES = [
 ]
 
 DA_POOL_STATE_FILE = BASE_DIR / "da_proxy_pool_state.json"
-DA_POOL_ANON_CHECK_URL = "http://api.ipify.org/"
+DA_POOL_ANON_CHECK_URL = "https://api.ipify.org/"
 DA_POOL_CHECK_TIMEOUT = 15
 DA_POOL_CHECK_WORKERS = 120
 DA_POOL_TARGET_ALIVE = 100
