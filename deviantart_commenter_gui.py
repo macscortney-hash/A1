@@ -6856,19 +6856,24 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
             key = username.lower()
 
             if reupload_image and attach_image and image_bytes and image_deviation and not dry_run:
-                _need_reup_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
-                if _need_reup_proxy:
-                    _rtag = "ru" + uuid.uuid4().hex[:10]
-                    _rproxy = with_sticky_session(raw_proxy_str, _rtag, lifetime_minutes=5)
-                    apply_proxy_to_session(session, _rproxy)
-                new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
-                if _need_reup_proxy:
-                    clear_session_proxy(session)
-                if new_dev:
-                    image_deviation = new_dev
-                    sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
-                else:
-                    sender_log(f"{prefix} ⚠ Не удалось перезалить изображение: {rerr}")
+                for _reup_try in range(3):
+                    _need_reup_proxy = bool(raw_proxy_str.strip()) and not proxy_for_comments
+                    if _need_reup_proxy:
+                        _rtag = "ru" + uuid.uuid4().hex[:10]
+                        _rproxy = with_sticky_session(raw_proxy_str, _rtag, lifetime_minutes=5)
+                        apply_proxy_to_session(session, _rproxy)
+                    new_dev, rerr = da_force_upload_stash_deviation(session, csrf_token, image_bytes)
+                    if _need_reup_proxy:
+                        clear_session_proxy(session)
+                    if new_dev:
+                        image_deviation = new_dev
+                        sender_log(f"{prefix} 🖼 Перезалито новое изображение в sta.sh")
+                        break
+                    if _reup_try < 2:
+                        sender_log(f"{prefix} ⚠ Перезаливка не удалась (попытка {_reup_try + 1}/3): {rerr[:120]}")
+                        time.sleep(random.uniform(2, 4))
+                    else:
+                        sender_log(f"{prefix} ⚠ Перезаливка не удалась (3/3), использую предыдущее изображение")
 
             try:
                 if photo_link:
@@ -7051,9 +7056,12 @@ def comment_worker(idx, cookie_text, comment_text, ignore_blacklist,
                             is_spam_error(cerr) or is_expired_session_error(cerr)
                             or is_unverified_account_error(cerr) or is_unauthorized_error(cerr)):
                         if is_spam_error(cerr):
-                            spam_type = _probe_spam_type(
-                                session, csrf_token, dev_id, url,
-                                sender_log, prefix, stop_event)
+                            if fallback_letters:
+                                spam_type = _probe_spam_type(
+                                    session, csrf_token, dev_id, url,
+                                    sender_log, prefix, stop_event)
+                            else:
+                                spam_type = "account"
                             if spam_type == "text" and fallback_letters:
                                 fb_text = "".join(random.choices(string.ascii_lowercase, k=random.randint(2, 5)))
                                 sender_log(f"{prefix} 🔤 Текст заспамлен — отправляю '{fb_text}' вместо текста...")
