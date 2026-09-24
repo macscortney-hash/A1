@@ -3583,13 +3583,43 @@ def nav_h(session):
 # latency, and hands out the fastest available one on demand. All state is
 # persisted to disk so a restart resumes from the last known-good pool.
 DA_PROXY_SOURCES = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
+    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
+    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt",
     "https://raw.githubusercontent.com/casals-ar/proxy-list/main/http",
     "https://raw.githubusercontent.com/casals-ar/proxy-list/main/https",
+    "https://raw.githubusercontent.com/berkay-digital/Proxy-Scraper/main/proxies.txt",
+    "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=5000&country=all",
+    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000",
+    "https://www.proxy-list.download/api/v1/get?type=http",
+    "https://www.proxy-list.download/api/v1/get?type=https",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/https/https.txt",
     "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
     "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
     "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
+    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
+    "https://raw.githubusercontent.com/HyperBeats/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/HyperBeats/proxy-list/main/https.txt",
+    "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt",
+    "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt",
+    "https://raw.githubusercontent.com/BlackSnowDot/proxylist-update-every-minute/main/http.txt",
+    "https://raw.githubusercontent.com/BlackSnowDot/proxylist-update-every-minute/main/https.txt",
     "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/http.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
+    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
+    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt",
+    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/https_proxies.txt",
 ]
 
 DA_POOL_STATE_FILE = BASE_DIR / "da_proxy_pool_state.json"
@@ -3601,7 +3631,7 @@ DA_POOL_STATE_FILE = BASE_DIR / "da_proxy_pool_state.json"
 # but the proxy itself functions). Workers then filter that finer via
 # mark_bad when the actual registration flow bounces.
 DA_POOL_CHECK_URL = "https://www.deviantart.com/"
-DA_POOL_CHECK_TIMEOUT = 6
+DA_POOL_CHECK_TIMEOUT = 15
 DA_POOL_CHECK_WORKERS = 120
 DA_POOL_TARGET_ALIVE = 100
 DA_POOL_MIN_ALIVE_TRIGGER = 60
@@ -3965,7 +3995,8 @@ class ProxyPool:
             t0 = time.time()
             r = http_mod.get(DA_POOL_CHECK_URL, proxies=proxy,
                              timeout=DA_POOL_CHECK_TIMEOUT,
-                             allow_redirects=False, headers=ua)
+                             allow_redirects=False, headers=ua,
+                             verify=False)
         except Exception:
             return -1, "dead"
         ms = round((time.time() - t0) * 1000)
